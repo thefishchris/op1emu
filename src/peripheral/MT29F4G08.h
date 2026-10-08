@@ -22,12 +22,14 @@ public:
     void SetReadCallback(ReadCallback callback) override;
     bool IsDataReady() const override;
     bool IsBusy() const override;
+    bool CompletePendingReset() override;
+    bool CompletePendingPageRead() override;
 
 protected:
     ReadCallback readCallback;
 
     void SetBusy();
-    void HandleCommand(u8 command);
+    void HandleCommand(u8 command, u8 completedAddressCycles);
     void ExecuteRead();
     void ExecuteProgram();
     void ExecuteErase();
@@ -55,4 +57,9 @@ protected:
     u32 idOffset = 0;
 
     bool isBusy = false;
+    bool resetPending = false;
+    bool pageReadPending = false;
+    bool pageReadDataReady = false;
+    u32 pendingReadPage = 0;
+    u32 pendingReadColumn = 0;
 };

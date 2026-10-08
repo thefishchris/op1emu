@@ -1,11 +1,14 @@
 #include "core.h"
 #include "cpu/cpu.h"
 #include "cpu/nand.h"
+#include "peripheral/MT29F4G08.h"
 #include "cec.h"
 #include "evt.h"
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <limits>
 
 namespace {
@@ -242,10 +245,8 @@ void CounterWrap() {
     Check(f.cpu.packet_entries == 0 && f.cpu.pc == 0x200, "defined unsigned wrap");
 }
 
-void CpuExposure() {
-    // The CPU polls NFC each block. Supply an idle, storage-free test device;
-    // this fixture must never read or write firmware/provisioning images.
-    class IdleNand final : public NandFlash {
+// Storage-free platform fixture: tests must never perform NAND operations.
+class IdleNand : public NandFlash {
     public:
         void SendCommand(u8) override { Check(false, "unexpected NAND command"); }
         void SendAddress(u8) override { Check(false, "unexpected NAND address"); }
@@ -258,7 +259,242 @@ void CpuExposure() {
         u32 PageRead(u8*, u32) override { Check(false, "unexpected DMA read"); return 0; }
         u32 PageWrite(const u8*, u32) override { Check(false, "unexpected DMA write"); return 0; }
         void SetReadCallback(ReadCallback) override {}
-    };
+};
+
+class ResetNand final : public IdleNand {
+    public:
+        void SendCommand(u8 command) override {
+            Check(command == 0xFF, "only NAND reset expected");
+            busy = true;
+            pending = true;
+        }
+        bool IsBusy() const override { return busy; }
+        bool CompletePendingReset() override {
+            if (!pending) return false;
+            pending = false;
+            busy = false;
+            return true;
+        }
+    private:
+        bool busy = false;
+        bool pending = false;
+};
+
+void NandResetIdleWake() {
+    BlackFinCpu cpu;
+    cpu.AttachNandFlash(std::make_shared<ResetNand>());
+    auto& memory = cpu.GetEmulator();
+    memory.MemoryWrite32(0xFFC00124, 0);
+    memory.MemoryWrite32(0xFFC00164, 1u << 16); // Only NFC can wake.
+    memory.MemoryWrite32(0xFFC0014C, 0); // NFC cannot be delivered to CEC.
+    memory.MemoryWrite32(0xFFC0370C, 0x16); // NBUSYIRQ enabled (active-low mask).
+    memory.MemoryWrite32(0xFFC03744, 0xFF);
+    Check((memory.MemoryRead32(0xFFC03704) & 1) == 0 &&
+          (memory.MemoryRead32(0xFFC03708) & 1) == 0,
+          "reset drives busy without prematurely latching NBUSYIRQ");
+
+    memory.MemoryWrite16(0x100, 0x0020);
+    cpu.SetPC(0x100);
+    cpu.Run();
+    Check(!cpu.IsIdle() && !cpu.UnsupportedIdle() && cpu.PC() == 0x102 &&
+          cpu.PacketEntryCount() == 1 && cpu.IdleEntryCount() == 1,
+          "NAND reset completion wakes IDLE without CEC delivery or resume issue");
+    Check((memory.MemoryRead32(0xFFC03704) & 1) != 0 &&
+          (memory.MemoryRead32(0xFFC03708) & 1) != 0 &&
+          (memory.MemoryRead32(0xFFC00160) & (1u << 16)) != 0,
+          "ready edge latches NBUSYIRQ and asserts SIC source 48");
+
+    memory.MemoryWrite32(0xFFC03708, 1);
+    Check((memory.MemoryRead32(0xFFC03708) & 1) == 0 &&
+          (memory.MemoryRead32(0xFFC00160) & (1u << 16)) == 0,
+          "NBUSYIRQ W1C deasserts SIC source 48");
+}
+
+void NandPageReadIdleWake() {
+    const char* imagePath = "/tmp/op1emu-page-read-completion-test.img";
+    std::remove(imagePath);
+    {
+        std::ofstream image(imagePath, std::ios::binary | std::ios::trunc);
+        std::array<u8, 2048> page{};
+        std::array<u8, 64> oob{};
+        page.fill(0xA5);
+        oob.fill(0xFF);
+        oob[0] = 0xD6;
+        oob[1] = 0x4D;
+        oob[2] = 0xD1;
+        image.write(reinterpret_cast<const char*>(page.data()), page.size());
+        image.seekp(536870912);
+        image.write(reinterpret_cast<const char*>(oob.data()), oob.size());
+        Check(image.good(), "create sparse NAND page-read fixture");
+    }
+
+    {
+        BlackFinCpu cpu;
+        auto flash = std::make_shared<MT29F4G08>(cpu, imagePath);
+        cpu.AttachNandFlash(flash);
+        auto& memory = cpu.GetEmulator();
+        memory.MemoryWrite32(0xFFC00124, 0);
+        memory.MemoryWrite32(0xFFC00164, 1u << 16); // Only NFC can wake.
+        memory.MemoryWrite32(0xFFC0014C, 0); // NFC cannot be delivered to CEC.
+        memory.MemoryWrite32(0xFFC0370C, 0x1E); // Isolate active-low NBUSYIRQ.
+        memory.MemoryWrite32(0xFFC03708, 0x1F);
+
+        memory.MemoryWrite32(0xFFC03744, 0x00);
+        for (u8 address : std::array<u8, 5>{0x00, 0x08, 0x00, 0x00, 0x00}) {
+            memory.MemoryWrite32(0xFFC03740, address);
+        }
+        memory.MemoryWrite32(0xFFC03744, 0x30);
+        Check(flash->IsBusy() && !flash->IsDataReady() &&
+              (memory.MemoryRead32(0xFFC03704) & 1) == 0 &&
+              (memory.MemoryRead32(0xFFC03708) & 1) == 0,
+              "00/address/30 page read enters busy before data is available");
+
+        memory.MemoryWrite16(0x100, 0x0020);
+        cpu.SetPC(0x100);
+        cpu.Run();
+        Check(!cpu.IsIdle() && !cpu.UnsupportedIdle() && cpu.PC() == 0x102 &&
+              !flash->IsBusy() && flash->IsDataReady(),
+              "page-read completion wakes IDLE once without CEC delivery");
+        Check((memory.MemoryRead32(0xFFC03704) & 1) != 0 &&
+              (memory.MemoryRead32(0xFFC03708) & 1) != 0 &&
+              (memory.MemoryRead32(0xFFC00160) & (1u << 16)) != 0,
+              "page-read ready edge latches NBUSYIRQ and SIC source 48");
+        Check((memory.MemoryRead32(0xFFC0372C) & 0xFF) == 0xD6 &&
+              (memory.MemoryRead32(0xFFC0372C) & 0xFF) == 0x4D &&
+              (memory.MemoryRead32(0xFFC0372C) & 0xFF) == 0xD1,
+              "completed page read exposes correct OOB data at column 2048");
+
+        memory.MemoryWrite32(0xFFC03708, 1);
+        memory.MemoryWrite16(0x102, 0x2000);
+        cpu.Run();
+        Check((memory.MemoryRead32(0xFFC03708) & 1) == 0 &&
+              (memory.MemoryRead32(0xFFC00160) & (1u << 16)) == 0,
+              "completed read does not relatch NBUSYIRQ without a new read");
+
+        memory.MemoryWrite32(0xFFC03744, 0xFF);
+        Check(flash->IsBusy(), "reset remains busy until its completion boundary");
+        memory.MemoryWrite16(0x110, 0x0020);
+        cpu.SetPC(0x110);
+        cpu.Run();
+        Check(!cpu.IsIdle() && !flash->IsBusy() &&
+              (memory.MemoryRead32(0xFFC03708) & 1) != 0,
+              "reset completion remains independent and latches NBUSYIRQ");
+        memory.MemoryWrite32(0xFFC03708, 1);
+
+        memory.MemoryWrite16(0x120, 0x0020);
+        cpu.SetPC(0x120);
+        cpu.Run();
+        Check(cpu.IsIdle() && cpu.UnsupportedIdle() &&
+              (memory.MemoryRead32(0xFFC03708) & 1) == 0,
+              "no pending NAND operation produces no duplicate completion or wake");
+    }
+    Check(std::remove(imagePath) == 0, "remove NAND page-read fixture");
+}
+
+void NandPageReadDmaIdleWake() {
+    const char* imagePath = "/tmp/op1emu-page-read-dma-test.img";
+    std::remove(imagePath);
+    std::array<u8, 2048> page{};
+    for (size_t i = 0; i < page.size(); ++i) page[i] = static_cast<u8>(i ^ (i >> 8));
+    {
+        std::ofstream image(imagePath, std::ios::binary | std::ios::trunc);
+        image.write(reinterpret_cast<const char*>(page.data()), page.size());
+        image.seekp(536870912);
+        const std::array<u8, 64> oob{};
+        image.write(reinterpret_cast<const char*>(oob.data()), oob.size());
+        Check(image.good(), "create sparse NAND DMA fixture");
+    }
+
+    {
+        BlackFinCpu cpu;
+        auto flash = std::make_shared<MT29F4G08>(cpu, imagePath);
+        cpu.AttachNandFlash(flash);
+        auto& memory = cpu.GetEmulator();
+
+        memory.MemoryWrite32(0xFFC00124, 1u << 30); // Only DMA2 can wake.
+        memory.MemoryWrite32(0xFFC00164, 0);
+        memory.MemoryWrite32(0xFFC0010C, 0); // DMA2 cannot be delivered to CEC.
+        memory.MemoryWrite32(0xFFC03744, 0x00);
+        for (u8 address : std::array<u8, 5>{0, 0, 0, 0, 0}) {
+            memory.MemoryWrite32(0xFFC03740, address);
+        }
+        memory.MemoryWrite32(0xFFC03744, 0x30);
+        Check(flash->CompletePendingPageRead(), "complete NAND array read before NFC DMA");
+
+        constexpr u32 destination = 0xFF900100;
+        memory.MemoryWrite32(0xFFC00C84, destination);
+        memory.MemoryWrite32(0xFFC00C90, 128);
+        memory.MemoryWrite32(0xFFC00C94, 2);
+        memory.MemoryWrite32(0xFFC00CA8, 1);
+        memory.MemoryWrite32(0xFFC00C88, 0x87);
+        memory.MemoryWrite8(destination, 0xEE);
+        Check(memory.MemoryRead32(0xFFC00C84) == destination &&
+              memory.MemoryRead32(0xFFC00C88) == 0x87 &&
+              memory.MemoryRead32(0xFFC00C90) == 128 &&
+              memory.MemoryRead32(0xFFC00C94) == 2 &&
+              memory.MemoryRead32(0xFFC00C98) == 0 &&
+              memory.MemoryRead32(0xFFC00C9C) == 0 &&
+              memory.MemoryRead32(0xFFC00CAC) == 0x2000,
+              "DMA2 is a linear 16-bit NFC-to-memory stop-mode transfer");
+
+        memory.MemoryWrite16(0x120, 0x2000); // Awake packet services ordinary devices.
+        cpu.SetPC(0x120);
+        cpu.Run();
+        Check(memory.MemoryRead8(destination) == 0xEE &&
+              memory.MemoryRead32(0xFFC00CB0) == 128 &&
+              memory.MemoryRead32(0xFFC00CA8) == 0x08,
+              "DMA2 remains blocked before PG_RD_START");
+
+        memory.MemoryWrite32(0xFFC03724, 1);
+        memory.MemoryWrite32(0xFFC03728, 1);
+        Check(memory.MemoryRead8(destination) == 0xEE &&
+              memory.MemoryRead32(0xFFC00CA8) == 0x08,
+              "PG_RD_START does not transfer before the device boundary");
+
+        const u32 cecMask = memory.MemoryRead32(CEC_MMR_BASE + 4);
+        const u32 cecPending = memory.MemoryRead32(CEC_MMR_BASE + 8);
+        const u32 cecLatched = memory.MemoryRead32(CEC_MMR_BASE + 12);
+        memory.MemoryWrite16(0x130, 0x0020);
+        cpu.SetPC(0x130);
+        cpu.Run();
+        Check(!cpu.IsIdle() && !cpu.UnsupportedIdle() && cpu.PC() == 0x132,
+              "DMA2 completion wakes IDLE without CEC delivery");
+        Check(memory.MemoryRead32(CEC_MMR_BASE + 4) == cecMask &&
+              memory.MemoryRead32(CEC_MMR_BASE + 8) == cecPending &&
+              memory.MemoryRead32(CEC_MMR_BASE + 12) == cecLatched,
+              "DMA2 IDLE wake does not require a CEC interrupt");
+        std::array<u8, 256> transferred{};
+        memory.MemoryRead(destination, transferred.data(), transferred.size());
+        Check(std::equal(transferred.begin(), transferred.end(), page.begin()),
+              "DMA2 writes the requested NAND bytes to contiguous guest memory");
+        Check(memory.MemoryRead32(0xFFC00C90) == 128 &&
+              memory.MemoryRead32(0xFFC00C94) == 2 &&
+              memory.MemoryRead32(0xFFC00CA4) == destination + 256 &&
+              memory.MemoryRead32(0xFFC00CB0) == 0,
+              "DMA2 preserves parameters and advances current address/count");
+        Check(memory.MemoryRead32(0xFFC00CA8) == 1 &&
+              (memory.MemoryRead32(0xFFC00120) & (1u << 30)) != 0,
+              "DMA2 DONE asserts SIC source 30 exactly at completion");
+        Check(memory.MemoryRead32(0xFFC03720) == 256,
+              "NFC counts exactly one 256-byte DMA page segment");
+
+        memory.MemoryWrite32(0xFFC00CA8, 1);
+        Check(memory.MemoryRead32(0xFFC00CA8) == 0 &&
+              (memory.MemoryRead32(0xFFC00120) & (1u << 30)) == 0,
+              "DMA_DONE W1C deasserts SIC source 30");
+        memory.MemoryWrite8(destination, 0x5A);
+        memory.MemoryWrite16(0x140, 0x2000);
+        cpu.SetPC(0x140);
+        cpu.Run();
+        Check(memory.MemoryRead8(destination) == 0x5A &&
+              memory.MemoryRead32(0xFFC03720) == 256 &&
+              memory.MemoryRead32(0xFFC00CA8) == 0,
+              "completed NFC DMA does not transfer or signal twice");
+    }
+    Check(std::remove(imagePath) == 0, "remove NAND DMA fixture");
+}
+
+void CpuExposure() {
     BlackFinCpu cpu;
     cpu.AttachNandFlash(std::make_shared<IdleNand>());
     Check(cpu.PacketEntryCount() == 0, "CPU exposes zero initial accounting");
@@ -285,6 +521,9 @@ int main() {
     ServiceException();
     InterruptEntry();
     CounterWrap();
+    NandResetIdleWake();
+    NandPageReadIdleWake();
+    NandPageReadDmaIdleWake();
     CpuExposure();
     std::puts("execution accounting: all runtime packet-entry cases passed");
 }

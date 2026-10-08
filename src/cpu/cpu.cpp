@@ -191,7 +191,7 @@ BlackFinCpu::BlackFinCpu() : pc(0) {
 
     ppi = std::make_shared<PPI>(0xFFC01000);
     devices.emplace_back(ppi);
-    std::shared_ptr<DMA> dma = std::make_shared<DMA>(0xFFC00C00, emulator);
+    dma = std::make_shared<DMA>(0xFFC00C00, emulator);
     devices.emplace_back(dma);
     dma->AttachDMABus(DMAPeripheralType::DMAPeripheralPPI, ppi);
     dma->AttachDMABus(DMAPeripheralType::DMAPeripheralNFC, nfc);
@@ -493,6 +493,8 @@ uint64_t BlackFinCpu::IdleEntryCount() const { return cpuState_->idle_entries; }
 
 void BlackFinCpu::ServiceIdle() {
     if (pll_->Unsupported()) { ReportUnsupportedIdle(pll_->Unsupported()); return; }
+    nfc->ServiceIdleCompletion();
+    if (nfc->PageReadDMAReady()) dma->ServiceIdleNFCReadCompletion();
     if (!pll_->WakeAsserted() && !sic->WakePending()) {
         if (const auto deadline = pll_->NextDeadlineTicks()) {
             pll_->AdvanceClkin(*deadline);

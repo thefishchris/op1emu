@@ -85,6 +85,7 @@ NFC::NFC(u32 baseAddr) : RegisterDevice("NFC", baseAddr, 0x50) {
     NFC_CMD.writeCallback = [this](u32 v) {
         command = v;
         nandFlash->SendCommand(command);
+        SetNotBusy(!nandFlash->IsBusy());
     };
 
     REG32(NFC_DATA_WR, 0x48);
@@ -111,11 +112,13 @@ void NFC::ResetECC()
 
 u32 NFC::DMARead(int x, int y, void* dest, u32 length)
 {
+    if (!PageReadDMAReady()) return 0;
     u32 len = nandFlash->PageRead(static_cast<u8*>(dest), length);
     CalculateECC(static_cast<const u8*>(dest), len);
     transferCount += len;
     if (transferCount >= PageSize()) {
         pageReadPending = false;
+        pageReadStart = false;
     }
     return len;
 }
@@ -210,7 +213,22 @@ void NFC::SetWriteBufferEmpty(bool value) {
 }
 
 void NFC::ProcessWithInterrupt(int ivg) {
+    nandFlash->CompletePendingReset();
+    nandFlash->CompletePendingPageRead();
     SetNotBusy(!nandFlash->IsBusy());
     readDataReady = nandFlash->IsDataReady();
     UpdateInterrupts();
+}
+
+bool NFC::ServiceIdleCompletion() {
+    if (!nandFlash) return false;
+    const bool completed = nandFlash->CompletePendingReset() ||
+                           nandFlash->CompletePendingPageRead();
+    if (!completed) return false;
+    SetNotBusy(!nandFlash->IsBusy());
+    return true;
+}
+
+bool NFC::PageReadDMAReady() const {
+    return nandFlash && pageReadStart && pageReadPending && nandFlash->IsDataReady();
 }

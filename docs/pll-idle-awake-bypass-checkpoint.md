@@ -1,12 +1,14 @@
-# Checkpoint: awake PLL bypass passed; next stop is NFC IDLE
+# Checkpoint: NFC DMA passed; PLL_DIV/CTL IDLE observed
 
-No further investigation was done after this note. SPORT, CoreTimer, guest `CYCLES`, DMA pacing, and the general scheduler remain disconnected.
+Investigation stopped at the requested `PLL_DIV=5`, `PLL_CTL=0x2000`, IDLE
+terminal condition. SPORT, CoreTimer, guest `CYCLES`, general DMA pacing, and
+the general scheduler remain disconnected.
 
 ## Git
 
 - Checkout: `/home/chris/Projects/op1-emu-gui-test/op1emu`
-- HEAD: `55335b4f225757f229aced2d688658bc72819593` (`feat: expose and test Bcore packet-entry accounting`)
-- Bcore: `e1f434f46fe391f6400d0e00ec0395a631acb89d`, dirty, not committed
+- Branch/HEAD: `wip/pll-idle-timing` at `75ebcdb` (`wip: model BF524 PLL and architectural idle`)
+- Bcore branch/HEAD: `wip/op1-timing` at `37de8e8`
 - Parent tree heavily dirty and unstaged. Includes earlier boot/audio/GPIO/storage work plus this PLL/IDLE work. Do not clean, reset, or sweep unrelated files into a commit.
 - Nothing staged. Do not commit images, NAND/OTP copies, or logs.
 
@@ -24,37 +26,110 @@ Valid only while the CPU is awake, a temporary-bypass deadline remains, and effe
 
 Trial `build/pll-awake-bypass-v241.*`. First VR write/IDLE unchanged: `VR_CTL=0x70B0` at `0xEF000C3C`, IDLE `0xEF000C3E`, immediate masked-CEC wake, resume `0xEF000C40`.
 
-Expiry log: block `0xEF005C24`, shadow delta 2, consumed 1, overshoot **1**, remaining 0, total-consumed **512**, expiries **1**, `post-cclk-known=0`. Intra-block expiry instruction is unknown. Functional execution continued. No `PLL_DIV=5` or `PLL_CTL=0x2000` write was observed. Reset-active PLL ambiguity did not stop this path.
+Expiry log: block `0xEF005C24`, shadow delta 2, consumed 1, overshoot **1**, remaining 0, total-consumed **512**, expiries **1**, `post-cclk-known=0`. Intra-block expiry instruction is unknown. Functional execution continued. This earlier trial did not observe `PLL_DIV=5` or `PLL_CTL=0x2000`; the later DMA-completion trial described below did.
 
-## Exact next stop
+## Completed NFC boundaries
 
-IDLE `0xEF00754C`, resume `0xEF00754E`, packet **15813**, IDLE entry **2**. Reason: `no known eligible wake completion or deterministic deadline`. CPU left idle. CEC `IMASK/IPEND/ILAT=0x1F/0x12/0`. SIC masks 0/0, ISR 0/0, IWR all-ones. PLL readback `0x0B00/4/0x70B0`, status `0x00A2`, lock count `0x0200`; active CTL still unset. `P3=0xFFC00000`. Shadow estimate 17946, observational only. Host time to this stop was about 0.80 s; not a guest-timing result. Screenshot blank. No tape UI.
+Reset and page-read completion are now explicit NAND operation boundaries rather
+than queued host-time delays:
 
-## NFC state at the stop
+- **CONFIRMED:** Micron PAGE READ is `0x00`, five address cycles, then `0x30`.
+  R/B# is low during array transfer and high when data is available.
+- **CONFIRMED:** BF52x `NFC_STAT.NBUSY` reflects synchronized `ND_RB`, while
+  `NFC_IRQSTAT.NBUSYIRQ` latches its rising edge and is W1C.
+- **CONFIRMED:** SIC source 48 can wake IDLE independently of CEC delivery.
+- **CONFIRMED:** one operation boundary completes one pending reset or valid
+  page read, produces one busy-to-ready edge, and latches one `NBUSYIRQ`.
+  Page data remains unavailable until read completion.
+- **UNKNOWN:** exact `tRST` and `tR`. The Micron datasheet gives maximum
+  `tR=25 us` with internal ECC disabled; whether device internal ECC is active
+  is **UNKNOWN**. The modeled boundary is not a hardware timing claim.
 
-- Before IDLE: `W[P3+0x3744]=R7` with `R7=0xFF`, so `NFC_CMD=0xFF`.
-- After IDLE, not executed: read `NFC_IRQSTAT` (`P3+0x3708`) bit 0; branch back to IDLE if clear.
-- Readbacks: `NFC_CTL=0`, `NFC_STAT=0x11`, `NFC_IRQSTAT=0`, `NFC_IRQMASK=0x16`.
-- Recent MMIO before the command is repeated reads of `NFC_IRQSTAT` at `0xEF007CB0`, all zero.
-- Preceding unknown NAND command `0x50` at `0xEF007524` is context, not the sampled wait.
+Production-model tests cover reset and a sparse page/OOB read, W1C clearing,
+the SIC wake with CEC masked, no duplicate completion, and independence of the
+reset and read paths. Existing program and erase timing was left unchanged.
 
-## Hypothesis
+## Controlled v241 result
 
-**LIKELY, not confirmed:** this IDLE waits for `NFC_IRQSTAT.NBUSYIRQ` (bit 0) after NAND reset command `0xFF`. The following instruction names that bit. `NFC_STAT.NBUSY` (bit 0 of `0x11`) already reads ready, so this is an edge latch, not the level bit. CEC delivery is not required: IMASK is the reset mask and SIC ISR is clear. `IRQMASK=0x16` does not mask bit 0, but the code polls status rather than taking the interrupt.
+Trial `build/nfc-page-read-wake-v241.log` retained all three PLL/shadow opt-ins.
+The ROM issued `NFC_CMD=0x00` at `0xEF007D00`, address bytes
+`00 08 00 00 00` (page 0, column 2048/OOB start), and `NFC_CMD=0x30` at
+`0xEF007D1A`. IDLE `0xEF007D1E` woke at packet **16374**, with SIC1 bit 16
+asserted and CEC `IMASK/IPEND/ILAT=0x1F/0x12/0` unchanged. A subsequent
+page-0/column-0 read woke at IDLE `0xEF007C4A`.
 
-## Already implemented versus missing
+`PLL_DIV=5` and `PLL_CTL=0x2000` were not observed. Reset-active PLL ambiguity
+therefore remains unresolved and was not bypassed with a new assumption.
 
-Implemented: `NFC_CMD` forwards to the flash model. `CMD_RESET=0xFF` calls `SetBusy()`, which queues a host `1 ns` event that only clears the flash `isBusy` flag. `NFC::ProcessWithInterrupt` copies `!IsBusy()` into `notBusy` and latches `NBUSYIRQ` on a rising edge. IRQSTAT bits exist and are W1C. Page program/read completion can set other IRQ bits.
+## Reconstructed DMA2 operation
 
-Missing for this wake: the IDLE path returns before `ProcessEvents` and `ProcessWithInterrupt`, so the queued busy-clear and `NBUSYIRQ` latch do not run. There is no documented NAND-reset deadline in CLKIN/SCLK ticks, and the `1 ns` host delay must not be reused. Command `0x50` is an explicit unknown. Do not invent a periodic wake.
+At IDLE `0xEF007C62`, DMA2 had `START_ADDR=0xFF907F00`, `CONFIG=0x87`,
+`X_COUNT=0x80`, `X_MODIFY=2`, inactive Y parameters, PMAP 2/NFC,
+`CURR_ADDR=0xFF907F00`, `CURR_X_COUNT=0x80`, and `IRQ_STATUS=0x08`.
+`CONFIG=0x87` is a 1-D, 16-bit, peripheral-to-memory receive in stop mode with
+completion interrupt enabled. The requested transfer is therefore 128 16-bit
+elements, or 256 bytes of page-0/column-0 NAND data, to
+`0xFF907F00..0xFF907FFF`.
+
+The exact instruction/MMIO sequence is:
+
+- `0xEF007C12`: DMA2 `CONFIG=0`; `0xEF007C14`: W1C `DMA_DONE`.
+- `0xEF007C1A`: DMA2 `CONFIG=0x87`.
+- `0xEF007C2C..0xEF007C46`: page-0/column-0 NAND read sequence.
+- `0xEF007C4A`: IDLE until NFC `NBUSYIRQ`, then acknowledge it.
+- `0xEF007C5E`: `NFC_PGCTL=1` (`PG_RD_START`).
+- `0xEF007C62`: IDLE; after wake, poll DMA2 `DMA_DONE`, loop while clear, and
+  W1C completion at `0xEF007C70`.
+
+**CONFIRMED:** the BF52x NFC procedure says `PG_RD_START` initiates page-read
+DMA after NAND data is available. `CURR_X_COUNT` decrements per element,
+`DMA_DONE` is asserted after the last memory write, DMA2 maps to SIC source 30,
+and SIC wake eligibility is independent of SIC/CEC interrupt masking.
+
+**CONFIRMED:** no transfer latency is required to model this finite boundary.
+The implementation gates NFC DMA reads on `PG_RD_START`, services only the
+observed DMA2 receive shape at IDLE, writes the 256 ready bytes, leaves
+`CURR_ADDR=0xFF908000` and `CURR_X_COUNT=0`, asserts `DMA_DONE` and SIC source
+30 once, and supports W1C acknowledgement. It does not add DMA pacing or
+auto-complete other DMA channels. Cycle-accurate DMA arbitration, FIFO/request
+cadence, and latency remain **UNKNOWN**.
+
+## Controlled v241 result
+
+In `build/dma2-nfc-completion-v241.log`, IDLE `0xEF007C62` woke at packet
+**17092** with SIC0 bit 30 asserted and CEC `IMASK/IPEND/ILAT=0x1F/0x12/0`
+unchanged. Execution continued through repeated NAND/NFC DMA operations and
+into loaded firmware without an unsupported-IDLE stop.
+
+The extended `build/dma2-nfc-followup-v241.log` reached the requested terminal
+condition:
+
+- `PLL_DIV=5` at `0xEF000C76`, packet **29255172**.
+- `PLL_CTL=0x2000` at `0xEF000C78`, packet **29255173**.
+- IDLE `0xEF000C7A`, packet **29255174**, IDLE entry **100265**.
+- The existing deterministic PLL lock boundary advanced 512 CLKIN ticks and
+  woke at `0xEF000C7C` with active control `0x2000`, provisional CCLK 400 MHz,
+  and provisional SCLK 80 MHz.
+
+No next unsupported boundary was established: the run had reached the required
+PLL/IDLE terminal condition. The runner continued beyond it only because it
+does not automatically terminate on that write sequence; no later behavior was
+investigated.
 
 ## Smallest next task
 
-Model only the NAND `0xFF` busy interval and the `NBUSYIRQ` rising edge with an evidence-backed completion, then wake this IDLE without delivering a CEC interrupt unless eligibility says so. Re-run the same v241 observation only far enough to see whether `PLL_DIV=5 -> PLL_CTL=0x2000 -> IDLE` is reached. Do not connect SPORT.
+Start a fresh bounded observation immediately after the completed
+`0xEF000C7A` PLL lock IDLE and stop at the first explicit unsupported hardware
+or timing boundary. Do not infer behavior from the post-terminal portion of the
+existing run, invent DMA pacing, connect SPORT, alter CoreTimer or guest
+`CYCLES`, or redesign the scheduler without evidence.
 
 ## Reproduce
 
-Use a new unused prefix. GUI trial needs X11/Xwayland. Nine selected tests passed before the trial, including `pll_idle_tests` and `execution_accounting_tests`.
+Use a new unused prefix. GUI trial needs X11/Xwayland. Nine selected tests
+passed before the trial: `pll_idle_tests`, `execution_accounting_tests`,
+`nand_ecc_tests`, `usb_reset_tests`, `mcp23017_tests`, `pcm_sample_tests`,
+`sport_audio_tests`, `audio_ring_tests`, and `otp_import_tests`.
 
 ```bash
 cmake --build build --target op1emu pll_idle_tests execution_accounting_tests sport_audio_tests usb_reset_tests mcp23017_tests pcm_sample_tests audio_ring_tests nand_ecc_tests -j2
@@ -66,7 +141,12 @@ OP1EMU_EXPERIMENTAL_CLKIN_HZ=25000000 OP1EMU_SHADOW_TIMING=1 OP1EMU_TRACE_CLOCK=
 ## Preserve
 
 - `/tmp/opencode/boot_trials.py` (whitelist includes the three PLL/shadow opt-ins; depends on untracked `tools/check_gui_controls.py`)
-- Trial evidence: `build/pll-awake-bypass-v241.*` and prior `build/pll-idle-foundation-v241.*` (logs, screenshots, private NAND/OTP). Do not commit.
+- Trial evidence: `build/nfc-reset-wake-v241.log`,
+  `build/nfc-page-read-wake-v241.log`, `build/dma2-reconstruct-v241.log`,
+  `build/dma2-nfc-completion-v241.log`, `build/dma2-nfc-followup-v241.*`,
+  `build/pll-awake-bypass-v241.*`, and prior
+  `build/pll-idle-foundation-v241.*` (logs, screenshots, private NAND/OTP).
+  Do not commit.
 - Docs: `docs/bf524-pll-idle-foundation.md`, `docs/op1-clock-readiness.md`, this file.
 - Local PDFs/text under `/tmp/opencode/`; hashes in the readiness doc.
 - Unrelated dirty work and `src/cpu/timing_probe.h`.

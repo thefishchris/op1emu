@@ -29,6 +29,7 @@ class PPI;
 class Display;
 class OLED;
 class NFC;
+class DMA;
 class GPTimer;
 class USBDevice;
 class NandFlash;
@@ -97,6 +98,7 @@ protected:
     std::shared_ptr<PPI> ppi;
     std::shared_ptr<OLED> oled;
     std::shared_ptr<NFC> nfc;
+    std::shared_ptr<DMA> dma;
     std::shared_ptr<GPTimer> gptimer;
     std::shared_ptr<USBDevice> usb;
     std::shared_ptr<SPORT> sport0;

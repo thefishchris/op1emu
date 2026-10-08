@@ -17,6 +17,8 @@ public:
     bool IsRunning() const { return running; }
     bool IsMDMA() const;
     bool IsMDMASource() const;
+    bool IsIdleNFCRead() const;
+    bool IsCompleted() const { return completed; }
     DMAPeripheralType GetPeripheralType() const { return peripheralType; }
 
     u32 ProcessTransfer();
@@ -176,6 +178,13 @@ bool DMAChannel::IsMDMASource() const {
     return peripheralType == DMAPeripheralMDMASrc0 || peripheralType == DMAPeripheralMDMASrc1;
 }
 
+bool DMAChannel::IsIdleNFCRead() const {
+    return enabled && running && memoryWrite && wordSize == 1 && !mode2D &&
+           !synchronized && dataInterruptEnabled && descriptorSize == 0 &&
+           next == DMANextOperation::Stop && peripheralType == DMAPeripheralNFC &&
+           xCount == 128 && xModify == 2 && currXCount == 128;
+}
+
 // Returns the number of bytes transferred in this call (0 if the channel is
 // idle, unattached, or blocked). MDMA channels are ordinary DMA channels
 // bound to a MemorySrcDMABus/MemoryDestDMABus pair (see dma.h) rather than a
@@ -331,6 +340,14 @@ void DMA::ProcessWithInterrupt(int ivg) {
             total += moved;
         }
     }
+}
+
+bool DMA::ServiceIdleNFCReadCompletion() {
+    constexpr size_t NFC_DMA_CHANNEL = 2;
+    auto& channel = channels[NFC_DMA_CHANNEL];
+    if (!channel->IsIdleNFCRead()) return false;
+    channel->ProcessTransfer();
+    return channel->IsCompleted();
 }
 
 void DMA::BindInterrupt(int channel, int q, InterruptHandler callback) {

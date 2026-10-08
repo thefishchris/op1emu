@@ -18,6 +18,8 @@ public:
 
     virtual bool IsDataReady() const = 0;
     virtual bool IsBusy() const = 0;
+    virtual bool CompletePendingReset() { return false; }
+    virtual bool CompletePendingPageRead() { return false; }
 
     virtual void StartPageRead() = 0;
     virtual void StartPageWrite() = 0;
@@ -40,6 +42,8 @@ public:
     u32 DMAWrite(int x, int y, const void* source, u32 length) override;
 
     void ProcessWithInterrupt(int ivg) override;
+    bool ServiceIdleCompletion();
+    bool PageReadDMAReady() const;
 
 protected:
     u32 PageSize() const { return (pageSize == 0) ? 256 : 512; }

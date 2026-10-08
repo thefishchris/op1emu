@@ -93,18 +93,24 @@ MT29F4G08::~MT29F4G08() {
 }
 
 void MT29F4G08::SendCommand(u8 command) {
+    const u8 completedAddressCycles = addressCycle;
     addressCycle = 0;
-    HandleCommand(command);
+    HandleCommand(command, completedAddressCycles);
 }
 
-void MT29F4G08::HandleCommand(u8 command) {
+void MT29F4G08::HandleCommand(u8 command, u8 completedAddressCycles) {
     switch (command) {
         case CMD_RESET:
             currentCommand = CMD_READ1;
             addressCycle = 0;
             dataOffset = 0;
             idOffset = 0;
-            SetBusy();
+            // The datasheet specifies only maximum tRST values, so expose
+            // completion as an operation boundary rather than inventing time.
+            isBusy = true;
+            resetPending = true;
+            pageReadPending = false;
+            pageReadDataReady = false;
             break;
         case CMD_READ_ID:
             addressCycle = TOTAL_ADDRESS_CYCLES - 1; // Expecting 1 address cycle for ID read
@@ -112,9 +118,10 @@ void MT29F4G08::HandleCommand(u8 command) {
             break;
         case CMD_READ1:
             addressCycle = 0;
+            pageReadDataReady = false;
             break;
         case CMD_READ2:
-            if (currentCommand == CMD_READ1) {
+            if (currentCommand == CMD_READ1 && completedAddressCycles == TOTAL_ADDRESS_CYCLES) {
                 ExecuteRead();
             }
             break;
@@ -198,6 +205,9 @@ u8 MT29F4G08::ReadData() {
         }
         return ERASED_VALUE;
     }
+    if (currentCommand == CMD_READ2 && !pageReadDataReady) {
+        return ERASED_VALUE;
+    }
     if (dataOffset < PAGE_TOTAL_SIZE) {
         return pageBuffer[dataOffset++];
     }
@@ -223,6 +233,7 @@ u32 MT29F4G08::PageWrite(const u8* data, u32 length) {
 }
 
 u32 MT29F4G08::PageRead(u8* data, u32 length) {
+    if (currentCommand == CMD_READ2 && !pageReadDataReady) return 0;
     u32 readLen = std::min(length, PAGE_TOTAL_SIZE - dataOffset);
     std::memcpy(data, pageBuffer.data() + dataOffset, readLen);
     dataOffset += readLen;
@@ -235,7 +246,7 @@ void MT29F4G08::SetReadCallback(ReadCallback callback) {
 
 bool MT29F4G08::IsDataReady() const {
     if (currentCommand == CMD_READ2) {
-        return dataOffset < PAGE_TOTAL_SIZE;
+        return pageReadDataReady && dataOffset < PAGE_TOTAL_SIZE;
     }
     if (currentCommand == CMD_READ_ID) {
         return idOffset < sizeof(ID_DATA);
@@ -245,6 +256,24 @@ bool MT29F4G08::IsDataReady() const {
 
 bool MT29F4G08::IsBusy() const {
     return isBusy;
+}
+
+bool MT29F4G08::CompletePendingReset() {
+    if (!resetPending) return false;
+    resetPending = false;
+    isBusy = false;
+    return true;
+}
+
+bool MT29F4G08::CompletePendingPageRead() {
+    if (!pageReadPending) return false;
+    LoadPage(pendingReadPage);
+    dataOffset = pendingReadColumn;
+    pageReadPending = false;
+    pageReadDataReady = true;
+    isBusy = false;
+    if (readCallback) readCallback(*this);
+    return true;
 }
 
 u32 MT29F4G08::GetColumnAddress() const {
@@ -326,16 +355,13 @@ void MT29F4G08::SavePage(u32 pageNumber) {
 }
 
 void MT29F4G08::ExecuteRead() {
-    SetBusy();
-    u32 pageNumber = GetCurrentPage();
-    u32 column = GetColumnAddress();
-
-    LoadPage(pageNumber);
-    dataOffset = column;
-
-    if (readCallback) {
-        readCallback(*this);
-    }
+    // tR has only a specified maximum, so complete this transfer at the next
+    // modeled NAND operation boundary rather than assigning a guessed delay.
+    pendingReadPage = GetCurrentPage();
+    pendingReadColumn = GetColumnAddress();
+    pageReadPending = true;
+    pageReadDataReady = false;
+    isBusy = true;
 }
 
 void MT29F4G08::ExecuteProgram() {
