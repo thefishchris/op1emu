@@ -5,10 +5,11 @@
 
 // op1emu headers
 #include "emu.h"
+struct CpuState;
 
 class EmulatorMemory : public Memory {
 public:
-    explicit EmulatorMemory(Emulator& emulator);
+    explicit EmulatorMemory(Emulator& emulator, const CpuState* cpu = nullptr);
 
     uint32_t base() const override;
     uint32_t size() const override;
@@ -25,7 +26,17 @@ public:
     const uint8_t* raw() const override;
 
     uint32_t rawmem_limit() const override { return 0; }
+    void DumpRecentMMIO() const;
 
 private:
     Emulator& emulator_;
+    void ObserveClock(uint32_t address, uint32_t value, unsigned width) const;
+    const CpuState* cpu_;
+    bool traceClock_ = false;
+    mutable unsigned clockEvents_ = 0;
+    struct MMIOEntry { uint32_t pc, address, value; unsigned width; bool write; };
+    mutable std::array<MMIOEntry, 32> recentMMIO_{};
+    mutable unsigned recentCount_ = 0;
+    mutable unsigned recentIndex_ = 0;
+    void RecordMMIO(uint32_t address, uint32_t value, unsigned width, bool write) const;
 };

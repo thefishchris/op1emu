@@ -14,6 +14,9 @@ public:
 
     // Called when a peripheral raises/lowers an interrupt
     void SetInterruptLevel(int pin, int level);
+    bool WakePending() const {
+        return ((isr[0] & iwr[0]) | (isr[1] & iwr[1])) != 0;
+    }
 
     void SetBootMode(u8 mode) { bmode = mode; }
 

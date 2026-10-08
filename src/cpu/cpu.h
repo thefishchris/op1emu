@@ -7,6 +7,7 @@
 
 // Forward declarations for bcore types (headers included in cpu.cpp only)
 struct CpuState;
+struct ShadowTiming;
 class Core;
 class EmulatorMemory;
 
@@ -22,6 +23,7 @@ enum RegIndex {
 
 class SIC;
 class CoreTimer;
+class BF524PLL;
 class GPIO;
 class PPI;
 class Display;
@@ -57,6 +59,13 @@ public:
     // CPU-thread-only runtime packet entries, including faulting attempts.
     // Not retired instructions or cycles; unsigned count wraps modulo 2^64.
     uint64_t PacketEntryCount() const;
+    const ShadowTiming* ShadowTimingStats() const;
+    bool IsIdle() const;
+    uint64_t IdleEntryCount() const;
+    bool UnsupportedIdle() const { return unsupportedIdle_; }
+    BF524PLL& ClockState() { return *pll_; }
+    struct AwakePLLStats { uint64_t consumed = 0, overshoot = 0, blocks = 0, expiries = 0; };
+    const AwakePLLStats& AwakePLLExperimentStats() const { return awakePLLStats_; }
 
     Emulator& GetEmulator() { return emulator; }
     USBDevice& GetUSB() { return *usb; }
@@ -75,9 +84,15 @@ public:
 protected:
     void ProcessInterrupt(int pin, int level);
     void ProcessEvents();
+    void ServiceIdle();
+    void ReportUnsupportedIdle(const char* reason);
 
     std::shared_ptr<SIC> sic;
     std::shared_ptr<CoreTimer> coreTimer;
+    std::shared_ptr<BF524PLL> pll_;
+    bool unsupportedIdle_ = false;
+    bool awakePLLExperiment_ = false;
+    AwakePLLStats awakePLLStats_;
     std::shared_ptr<GPIO> portG;
     std::shared_ptr<PPI> ppi;
     std::shared_ptr<OLED> oled;
@@ -97,6 +112,7 @@ protected:
     std::chrono::system_clock::time_point startTime;
     Emulator emulator;
     std::unique_ptr<CpuState> cpuState_;
+    std::unique_ptr<ShadowTiming> shadowTiming_;
     std::unique_ptr<EmulatorMemory> bcoreMemory_;
     std::shared_ptr<Core> core_;
     uint32_t pc;

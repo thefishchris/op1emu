@@ -115,6 +115,12 @@ target_include_directories(op1emu PRIVATE ${stb_SOURCE_DIR} ${miniaudio_SOURCE_D
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(pll_idle_tests tests/pll_idle_tests.cpp)
+    target_link_libraries(pll_idle_tests PRIVATE emulator)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(pll_idle_tests PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion -Wno-unused-parameter)
+    endif()
+    add_test(NAME pll_idle_tests COMMAND pll_idle_tests)
     add_executable(execution_accounting_tests tests/execution_accounting_tests.cpp)
     target_link_libraries(execution_accounting_tests PRIVATE emulator bfin-core)
     target_include_directories(execution_accounting_tests PRIVATE ext/bcore/src)

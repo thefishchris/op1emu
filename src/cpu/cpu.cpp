@@ -5,6 +5,7 @@
 #include "twi.h"
 #include "sic.h"
 #include "coretimer.h"
+#include "pll.h"
 #include "otp.h"
 #include "gptimer.h"
 #include "dma.h"
@@ -27,8 +28,11 @@
 
 #include "core.h"
 #include "cpu_state.h"
+#include "shadow_timing.h"
 #include "mmr.h"
 #include <cstring>
+#include <cstdlib>
+#include <stdexcept>
 
 // bcore CEC functions (extern "C" in bcore's src/cec.h)
 extern "C" void cec_raise(CpuState* cpu, uint32_t ivg);
@@ -111,8 +115,37 @@ public:
 BlackFinCpu::BlackFinCpu() : pc(0) {
     cpuState_ = std::make_unique<CpuState>();
     memset(cpuState_.get(), 0, sizeof(CpuState));
+    if (const char* value = std::getenv("OP1EMU_SHADOW_TIMING")) {
+        if (std::strcmp(value, "1") != 0 && std::strcmp(value, "0") != 0)
+            throw std::invalid_argument("OP1EMU_SHADOW_TIMING must be 0 or 1");
+        if (std::strcmp(value, "1") == 0) {
+            shadowTiming_ = std::make_unique<ShadowTiming>();
+            cpuState_->shadow_timing = shadowTiming_.get();
+            LogInfo("Shadow timing enabled: observational issue baseline + documented penalties; no device time conversion");
+        }
+    }
 
     auto irqHandler = [this](int q, int level) { this->ProcessInterrupt(q, level); };
+    uint64_t experimentalClkin = 0;
+    if (const char* value = std::getenv("OP1EMU_EXPERIMENTAL_CLKIN_HZ")) {
+        // Explicit opt-in only. This is the LIKELY photo-derived experiment,
+        // not an unconditional original-OP-1 oscillator specification.
+        if (std::strcmp(value, "25000000") != 0)
+            throw std::invalid_argument("OP1EMU_EXPERIMENTAL_CLKIN_HZ currently supports only provisional 25000000");
+        experimentalClkin = 25000000;
+        LogInfo("PLL experimental CLKIN=25000000 Hz (PROVISIONAL/LIKELY board-photo inference; disconnected from devices)");
+    }
+    pll_ = std::make_shared<BF524PLL>(experimentalClkin);
+    if (const char* value = std::getenv("OP1EMU_EXPERIMENTAL_PLL_AWAKE_BYPASS")) {
+        if (std::strcmp(value, "1") != 0 && std::strcmp(value, "0") != 0)
+            throw std::invalid_argument("OP1EMU_EXPERIMENTAL_PLL_AWAKE_BYPASS must be 0 or 1");
+        awakePLLExperiment_ = std::strcmp(value, "1") == 0 && experimentalClkin && shadowTiming_;
+        if (awakePLLExperiment_)
+            LogInfo("PLL awake-bypass EXPERIMENTAL ideal/no-stall shadow deltas enabled ONLY while temporary CCLK=CLKIN; block-level expiry, no peripheral time conversion");
+        else if (std::strcmp(value, "1") == 0)
+            LogInfo("PLL awake-bypass experiment disabled: explicit provisional CLKIN and OP1EMU_SHADOW_TIMING=1 both required");
+    }
+    devices.emplace_back(pll_);
     devices.emplace_back(std::make_shared<MemoryDevice>("L1 SRAM", 0xFFB00000, 0x1000));
     devices.emplace_back(std::make_shared<MemoryDevice>("PORT_MUX", 0xFFC03200, 0x100));
     devices.emplace_back(std::make_shared<MemoryDevice>("Data A",   0xFF800000, 0x4000));
@@ -278,7 +311,7 @@ BlackFinCpu::BlackFinCpu() : pc(0) {
     oled = std::make_shared<OLED>(oledDatabus, oledCs, oledRs, oledRd, oledWr);
 
     // Initialize bcore after all devices are bound
-    bcoreMemory_ = std::make_unique<EmulatorMemory>(emulator);
+    bcoreMemory_ = std::make_unique<EmulatorMemory>(emulator, cpuState_.get());
     core_ = std::make_shared<Core>(cpuState_.get(), bcoreMemory_.get());
     core_->init(2);
 
@@ -321,6 +354,18 @@ static void SetBfinCycles(CpuState& cpu_state, u64 cycles) {
 }
 
 HaltReason BlackFinCpu::Run() {
+    if (unsupportedIdle_) return HaltReason::Break;
+    if (cpuState_->idle) {
+        ServiceIdle();
+        return HaltReason::Break; // A wake never issues a packet in this call.
+    }
+    // Permit only the explicit ideal/no-stall experiment with known CCLK=CLKIN.
+    // A missing/unknown ratio is still an observable stop, never a guessed clock.
+    const bool advanceAwakeBypass = pll_->CanAdvanceAwakeBypass(awakePLLExperiment_);
+    if (pll_->NextDeadlineTicks() && !advanceAwakeBypass) {
+        ReportUnsupportedIdle("awake PLL bypass countdown needs a running CLKIN time source");
+        return HaltReason::Break;
+    }
     auto microSecondsElapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now() - startTime).count();
     auto cyclesElapsed = microSecondsElapsed * 400; // assuming 400MHz CPU clock
     // Sync cycles with system time
@@ -333,8 +378,45 @@ HaltReason BlackFinCpu::Run() {
     }
     // Execute one basic block — bcore updates cpuState_->pc internally.
     // Hardware loops, PC advance, and hwloop counters are all handled by bcore.
+    const uint64_t shadowBefore = advanceAwakeBypass ? shadowTiming_->EstimatedCycles() : 0;
+    const uint64_t unknownBefore = advanceAwakeBypass ? shadowTiming_->unknown_packets : 0;
+    const uint64_t fixedUnknownBefore = advanceAwakeBypass ? shadowTiming_->unknown_fixed_packets : 0;
+    const u32 blockPC = cpuState_->pc;
     core_->run(cpuState_->pc);
+    if (advanceAwakeBypass) {
+        const uint64_t delta = shadowTiming_->EstimatedCycles() - shadowBefore;
+        // This call started awake. Its newly issued cycles (including a terminal
+        // IDLE's issue) precede any idle-domain advancement in ServiceIdle below.
+        // No cycles from before activation, event dispatch, or idle duration enter.
+        const auto result = pll_->AdvanceAwakeBypass(delta, true, awakePLLExperiment_);
+        if (result.consumed) {
+            awakePLLStats_.consumed += result.consumed;
+            awakePLLStats_.overshoot += result.overshoot;
+            ++awakePLLStats_.blocks;
+            if (result.expired) ++awakePLLStats_.expiries;
+            if (awakePLLStats_.blocks <= 16 || result.expired)
+                LogInfo("pll-awake-bypass block-pc=%08X resume=%08X shadow-before=%llu delta=%llu consumed=%llu remaining=%llu overshoot=%llu total-consumed=%llu expiries=%llu unknown-packets=%llu unknown-fixed=%llu post-cclk-known=%u expired=%u (EXPERIMENTAL ideal/no-stall; intra-block expiry unknown)",
+                        blockPC, cpuState_->pc, static_cast<unsigned long long>(shadowBefore),
+                        static_cast<unsigned long long>(delta), static_cast<unsigned long long>(result.consumed),
+                        static_cast<unsigned long long>(pll_->NextDeadlineTicks().value_or(0)),
+                        static_cast<unsigned long long>(result.overshoot), static_cast<unsigned long long>(awakePLLStats_.consumed),
+                        static_cast<unsigned long long>(awakePLLStats_.expiries),
+                        static_cast<unsigned long long>(shadowTiming_->unknown_packets - unknownBefore),
+                        static_cast<unsigned long long>(shadowTiming_->unknown_fixed_packets - fixedUnknownBefore),
+                        pll_->CoreHz().has_value() ? 1u : 0u, result.expired ? 1u : 0u);
+        }
+    }
     cpuState_->did_jump = false; // Clear jump flag set by bcore, since we handle it in the emulator loop
+    if (cpuState_->idle) {
+        LogInfo("idle-enter pc=%08X resume=%08X packets=%llu entries=%llu host-us=%lld",
+                cpuState_->idle_pc, cpuState_->pc,
+                static_cast<unsigned long long>(cpuState_->packet_entries),
+                static_cast<unsigned long long>(cpuState_->idle_entries),
+                static_cast<long long>(microSecondsElapsed));
+        pll_->EnterIdle();
+        ServiceIdle();
+        return HaltReason::Break;
+    }
     cec_check_pending(cpuState_.get());
 
     // Get active IVG from CEC
@@ -404,6 +486,85 @@ u32 BlackFinCpu::PC() {
 
 uint64_t BlackFinCpu::PacketEntryCount() const {
     return cpuState_->packet_entries;
+}
+
+bool BlackFinCpu::IsIdle() const { return cpuState_->idle; }
+uint64_t BlackFinCpu::IdleEntryCount() const { return cpuState_->idle_entries; }
+
+void BlackFinCpu::ServiceIdle() {
+    if (pll_->Unsupported()) { ReportUnsupportedIdle(pll_->Unsupported()); return; }
+    if (!pll_->WakeAsserted() && !sic->WakePending()) {
+        if (const auto deadline = pll_->NextDeadlineTicks()) {
+            pll_->AdvanceClkin(*deadline);
+            LogInfo("pll-deadline elapsed-clkin=%llu total-clkin=%llu ctl=%04X active=%04X div=%04X stat=%04X provisional-cclk=%llu provisional-sclk=%llu",
+                    static_cast<unsigned long long>(*deadline), static_cast<unsigned long long>(pll_->ClkinTicks()),
+                    pll_->Read32(0), pll_->ActiveCtl().value_or(0), pll_->Divider(), pll_->Status(),
+                    static_cast<unsigned long long>(pll_->CoreHz().value_or(0)),
+                    static_cast<unsigned long long>(pll_->SystemHz().value_or(0)));
+        }
+    }
+    if (pll_->WakeAsserted()) sic->SetInterruptLevel(0, 1); // DPMC SIC source 0.
+    if (sic->WakePending()) {
+        cpuState_->idle = false;
+        LogInfo("idle-wake resume=%08X packets=%llu entries=%llu sic=%X/%X cec=%X/%X/%X",
+                cpuState_->pc, static_cast<unsigned long long>(cpuState_->packet_entries),
+                static_cast<unsigned long long>(cpuState_->idle_entries), sic->Read32(0x20), sic->Read32(0x60),
+                cec_mmr_read(cpuState_.get(), CEC_MMR_BASE + 4),
+                cec_mmr_read(cpuState_.get(), CEC_MMR_BASE + 8), cec_mmr_read(cpuState_.get(), CEC_MMR_BASE + 12));
+        // Existing interrupt routing is independent of IWR/CEC wake eligibility.
+        ProcessEvents();
+        cec_check_pending(cpuState_.get());
+        pll_->AcknowledgeWake();
+        sic->SetInterruptLevel(0, 0);
+        return;
+    }
+    ReportUnsupportedIdle(pll_->WakeAsserted() ? "PLL wake disabled in SIC_IWR0" :
+                          "no known eligible wake completion or deterministic deadline");
+}
+
+void BlackFinCpu::ReportUnsupportedIdle(const char* reason) {
+    unsupportedIdle_ = true;
+    LogWarn("idle-unsupported reason=%s idle=%u pc=%08X resume=%08X packets=%llu entries=%llu rets=%08X reti=%08X seqstat=%08X ivg=%d",
+            reason, cpuState_->idle ? 1u : 0u, cpuState_->idle_pc, cpuState_->pc,
+            static_cast<unsigned long long>(cpuState_->packet_entries),
+            static_cast<unsigned long long>(cpuState_->idle_entries), cpuState_->rets, cpuState_->reti,
+            cpuState_->seqstat, cec_current_ivg());
+    LogWarn("idle-state cec=%X/%X/%X sic-mask=%X/%X sic-isr=%X/%X sic-iwr=%X/%X pll=%X/%X/%X/%X/%X active-vr=%X",
+            cec_mmr_read(cpuState_.get(), CEC_MMR_BASE + 4), cec_mmr_read(cpuState_.get(), CEC_MMR_BASE + 8),
+            cec_mmr_read(cpuState_.get(), CEC_MMR_BASE + 12), sic->Read32(0x0C), sic->Read32(0x4C),
+            sic->Read32(0x20), sic->Read32(0x60), sic->Read32(0x24), sic->Read32(0x64),
+            pll_->Read32(0), pll_->Read32(4), pll_->Read32(8), pll_->Status(), pll_->Read32(16), pll_->ActiveVR());
+    for (unsigned i = 0; i < 16; ++i)
+        LogWarn("idle-register dpreg=%u value=%08X", i, cpuState_->dpregs[i]);
+    // Non-destructive control/status readbacks only, never peripheral FIFOs.
+    for (u32 address : {0xFFC03600u, 0xFFC03608u, 0xFFC0360Cu,
+                        0xFFC03700u, 0xFFC03704u, 0xFFC03708u, 0xFFC0370Cu,
+                        0xFFC01414u, 0xFFC01418u, 0xFFC01420u, 0xFFC01424u,
+                        0xFFC00C48u, 0xFFC00C68u, 0xFFC00C70u,
+                        0xFFC00C88u, 0xFFC00CA8u, 0xFFC00CB0u})
+        LogWarn("idle-device address=%08X value=%08X", address, emulator.MemoryRead32(address));
+    if (shadowTiming_)
+        LogWarn("idle-shadow packets=%llu estimate=%llu idle-entries=%llu (observational only)",
+                static_cast<unsigned long long>(shadowTiming_->packets),
+                static_cast<unsigned long long>(shadowTiming_->EstimatedCycles()),
+                static_cast<unsigned long long>(cpuState_->idle_entries));
+    bcoreMemory_->DumpRecentMMIO();
+    const u32 pc = cpuState_->idle_pc;
+    const bool mappedCode = pc < 0x08000000 || (pc >= 0xEF000020 && pc < 0xEF007FC0) ||
+                            (pc >= 0xFFA00020 && pc < 0xFFA0BFC0);
+    if (mappedCode && pc >= 32) {
+        u32 address = pc - 32;
+        for (unsigned i = 0; i < 32 && address <= pc + 32; ++i) {
+            auto [text, next] = core_->disassemble(address);
+            LogWarn("idle-context address=%08X %s", address, text.c_str());
+            if (next <= address || next - address > 8) break;
+            address = next;
+        }
+    }
+}
+
+const ShadowTiming* BlackFinCpu::ShadowTimingStats() const {
+    return shadowTiming_.get();
 }
 
 void BlackFinCpu::QueueEvent(const std::function<void()>& event, std::chrono::nanoseconds delay) {
