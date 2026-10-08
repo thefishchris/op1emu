@@ -402,6 +402,10 @@ u32 BlackFinCpu::PC() {
     return cpuState_->pc;
 }
 
+uint64_t BlackFinCpu::PacketEntryCount() const {
+    return cpuState_->packet_entries;
+}
+
 void BlackFinCpu::QueueEvent(const std::function<void()>& event, std::chrono::nanoseconds delay) {
     std::unique_lock<std::recursive_mutex> lock(eventQueueMutex);
     eventQueue.push_back({delay, event});

@@ -54,6 +54,10 @@ public:
     void SetPC(u32 value) override;
     u32 PC() override;
 
+    // CPU-thread-only runtime packet entries, including faulting attempts.
+    // Not retired instructions or cycles; unsigned count wraps modulo 2^64.
+    uint64_t PacketEntryCount() const;
+
     Emulator& GetEmulator() { return emulator; }
     USBDevice& GetUSB() { return *usb; }
 
