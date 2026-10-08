@@ -66,6 +66,8 @@ protected:
     bool writeBufferOverflow = false;
     bool writeBufferEmptyRising = true;
     bool readDataReady = false;
+    bool readDataConsumed = false;
+    bool readRequestPending = false;
     bool pageWriteDone = false;
 
     u16 irqmask = 0x1F;

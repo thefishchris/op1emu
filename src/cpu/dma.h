@@ -80,6 +80,7 @@ public:
 
     void BindInterrupt(int channel, int q, InterruptHandler callback);
     bool ServiceIdleNFCReadCompletion();
+    bool ServiceIdleMDMACompletion();
 
     std::shared_ptr<DMABus> GetDMABus(DMAPeripheralType type) { return dmaBuses[type]; }
     Emulator& GetEmulator() { return emulator; }

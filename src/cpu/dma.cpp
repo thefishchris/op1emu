@@ -18,6 +18,7 @@ public:
     bool IsMDMA() const;
     bool IsMDMASource() const;
     bool IsIdleNFCRead() const;
+    bool IsIdleMDMADestinationFor(const DMAChannel& source) const;
     bool IsCompleted() const { return completed; }
     DMAPeripheralType GetPeripheralType() const { return peripheralType; }
 
@@ -54,7 +55,7 @@ protected:
     u32 currDescPtr = 0;    // 0x20
     u32 currAddr = 0;       // 0x24
     u16 peripheralMap = 0;  // 0x2C
-    u16 currXCount = 0;     // 0x30
+    u32 currXCount = 0;     // 0x30; 65536 is exposed as 0 in the 16-bit MMR
     u16 currYCount = 0;     // 0x38
 };
 
@@ -166,7 +167,7 @@ void DMAChannel::ProcessDescriptor()
 
     currDescPtr = nextDescPtr;
     currAddr = startAddr;
-    currXCount = xCount ?: 0xFFFF;
+    currXCount = xCount ? xCount : 65536;
     currYCount = yCount ?: 0xFFFF;
 }
 
@@ -183,6 +184,19 @@ bool DMAChannel::IsIdleNFCRead() const {
            !synchronized && dataInterruptEnabled && descriptorSize == 0 &&
            next == DMANextOperation::Stop && peripheralType == DMAPeripheralNFC &&
            xCount == 128 && xModify == 2 && currXCount == 128;
+}
+
+bool DMAChannel::IsIdleMDMADestinationFor(const DMAChannel& source) const {
+    const bool sourceReady =
+        (source.running && source.xCount == xCount) ||
+        (source.completed && !source.running && source.currXCount == 0 && source.xCount == xCount);
+    return enabled && running && memoryWrite && IsMDMA() && !IsMDMASource() &&
+           !mode2D && !synchronized && dataInterruptEnabled && descriptorSize == 0 &&
+           next == DMANextOperation::Stop && currXCount > 0 &&
+           source.enabled && sourceReady && !source.memoryWrite && source.IsMDMASource() &&
+           !source.mode2D && !source.synchronized && source.descriptorSize == 0 &&
+           source.next == DMANextOperation::Stop && source.wordSize == wordSize &&
+           static_cast<int>(source.peripheralType) == static_cast<int>(peripheralType) + 1;
 }
 
 // Returns the number of bytes transferred in this call (0 if the channel is
@@ -205,7 +219,8 @@ u32 DMAChannel::ProcessTransfer() {
     totalBytes = std::min(totalBytes, (u32)sizeof(buffer));
     dma.GetEmulator().Lock();
     if (memoryWrite) {
-        totalBytes = bus->DMARead(xCount - currXCount, yCount - currYCount, buffer, totalBytes);
+        const u32 totalXCount = xCount ? xCount : 65536;
+        totalBytes = bus->DMARead(totalXCount - currXCount, yCount - currYCount, buffer, totalBytes);
         totalBytes -= totalBytes % elementBytes; // only write whole elements
         if (xModify == elementBytes) {
             dma.GetEmulator().MemoryWrite(currAddr, buffer, totalBytes);
@@ -227,7 +242,8 @@ u32 DMAChannel::ProcessTransfer() {
                 addr += xModify;
             }
         }
-        totalBytes = bus->DMAWrite(xCount - currXCount, yCount - currYCount, buffer, totalBytes);
+        const u32 totalXCount = xCount ? xCount : 65536;
+        totalBytes = bus->DMAWrite(totalXCount - currXCount, yCount - currYCount, buffer, totalBytes);
         totalBytes -= totalBytes % elementBytes; // only count whole elements accepted
     }
     dma.GetEmulator().Unlock();
@@ -241,7 +257,7 @@ u32 DMAChannel::ProcessTransfer() {
         if (mode2D) {
             currYCount--;
             if (currYCount > 0) {
-                currXCount = xCount;
+                currXCount = xCount ? xCount : 65536;
                 currAddr = currAddr - xModify + yModify;
                 transferComplete = false;
             }
@@ -348,6 +364,21 @@ bool DMA::ServiceIdleNFCReadCompletion() {
     if (!channel->IsIdleNFCRead()) return false;
     channel->ProcessTransfer();
     return channel->IsCompleted();
+}
+
+bool DMA::ServiceIdleMDMACompletion() {
+    for (size_t destinationIndex = 12; destinationIndex <= 14; destinationIndex += 2) {
+        auto& destination = channels[destinationIndex];
+        auto& source = channels[destinationIndex + 1];
+        if (!destination->IsIdleMDMADestinationFor(*source)) continue;
+
+        while (source->IsRunning() || destination->IsRunning()) {
+            const u32 moved = source->ProcessTransfer() + destination->ProcessTransfer();
+            if (!moved) return false;
+        }
+        return destination->IsCompleted();
+    }
+    return false;
 }
 
 void DMA::BindInterrupt(int channel, int q, InterruptHandler callback) {

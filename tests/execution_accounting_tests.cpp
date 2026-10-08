@@ -10,6 +10,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <limits>
+#include <vector>
 
 namespace {
 void Check(bool condition, const char* what) {
@@ -318,10 +319,10 @@ void NandPageReadIdleWake() {
         std::array<u8, 2048> page{};
         std::array<u8, 64> oob{};
         page.fill(0xA5);
-        oob.fill(0xFF);
-        oob[0] = 0xD6;
-        oob[1] = 0x4D;
-        oob[2] = 0xD1;
+        oob.fill(0x7C);
+        oob[4] = 0xD6;
+        oob[5] = 0x4D;
+        oob[6] = 0xD1;
         image.write(reinterpret_cast<const char*>(page.data()), page.size());
         image.seekp(536870912);
         image.write(reinterpret_cast<const char*>(oob.data()), oob.size());
@@ -340,7 +341,7 @@ void NandPageReadIdleWake() {
         memory.MemoryWrite32(0xFFC03708, 0x1F);
 
         memory.MemoryWrite32(0xFFC03744, 0x00);
-        for (u8 address : std::array<u8, 5>{0x00, 0x08, 0x00, 0x00, 0x00}) {
+        for (u8 address : std::array<u8, 5>{0x04, 0x08, 0x00, 0x00, 0x00}) {
             memory.MemoryWrite32(0xFFC03740, address);
         }
         memory.MemoryWrite32(0xFFC03744, 0x30);
@@ -359,10 +360,26 @@ void NandPageReadIdleWake() {
               (memory.MemoryRead32(0xFFC03708) & 1) != 0 &&
               (memory.MemoryRead32(0xFFC00160) & (1u << 16)) != 0,
               "page-read ready edge latches NBUSYIRQ and SIC source 48");
-        Check((memory.MemoryRead32(0xFFC0372C) & 0xFF) == 0xD6 &&
-              (memory.MemoryRead32(0xFFC0372C) & 0xFF) == 0x4D &&
-              (memory.MemoryRead32(0xFFC0372C) & 0xFF) == 0xD1,
-              "completed page read exposes correct OOB data at column 2048");
+
+        memory.MemoryWrite32(0xFFC03724, 1);
+        memory.MemoryWrite32(0xFFC03720, 0x155);
+        Check(memory.MemoryRead32(0xFFC03720) == 0 &&
+              (memory.MemoryRead32(0xFFC03708) & 8) == 0,
+              "NFC_COUNT is read-only and page completion does not imply RD_RDY");
+        memory.MemoryWrite32(0xFFC0374C, 0);
+        constexpr std::array<u32, 3> expectedPrefix{0xD6, 0x4D, 0xD1};
+        for (u32 i = 0; i < 62; ++i) {
+            Check((memory.MemoryRead32(0xFFC03708) & 8) != 0,
+                  "NFC_DATA_RD completion latches RD_RDY");
+            if (i + 1 < 62) memory.MemoryWrite32(0xFFC0374C, 0);
+            const u32 value = memory.MemoryRead32(0xFFC0372C) & 0xFF;
+            const u32 expected = i < expectedPrefix.size() ? expectedPrefix[i] : i < 60 ? 0x7C : 0xFF;
+            Check(value == expected && memory.MemoryRead32(0xFFC03720) == i + 1,
+                  "PIO reads advance NFC_COUNT through and beyond the page buffer");
+            memory.MemoryWrite32(0xFFC03708, 8);
+            Check(((memory.MemoryRead32(0xFFC03708) & 8) != 0) == (i + 1 < 62),
+                  "RD_RDY W1C exposes one pipelined read completion");
+        }
 
         memory.MemoryWrite32(0xFFC03708, 1);
         memory.MemoryWrite16(0x102, 0x2000);
@@ -494,6 +511,51 @@ void NandPageReadDmaIdleWake() {
     Check(std::remove(imagePath) == 0, "remove NAND DMA fixture");
 }
 
+void MdmaIdleWake() {
+    BlackFinCpu cpu;
+    cpu.AttachNandFlash(std::make_shared<IdleNand>());
+    auto& memory = cpu.GetEmulator();
+    constexpr u32 source = 0xFF807FFC;
+    constexpr u32 destination = 0x01000000;
+    std::vector<u8> expected(65536 * 4);
+    constexpr std::array<u8, 4> fill{0x5A, 0xC3, 0x17, 0xE8};
+    for (size_t i = 0; i < expected.size(); ++i) expected[i] = fill[i % fill.size()];
+    memory.MemoryWrite(source, fill.data(), fill.size());
+
+    memory.MemoryWrite32(0xFFC00124, 0);
+    memory.MemoryWrite32(0xFFC00164, 1u << 10); // Only MDMA0 can wake.
+    memory.MemoryWrite32(0xFFC0014C, 0); // MDMA0 cannot be delivered to CEC.
+    memory.MemoryWrite32(0xFFC00F44, source);
+    memory.MemoryWrite32(0xFFC00F50, 0);
+    memory.MemoryWrite32(0xFFC00F54, 0);
+    memory.MemoryWrite32(0xFFC00F48, 0x09);
+    memory.MemoryWrite16(0x80, 0x2000);
+    cpu.SetPC(0x80);
+    cpu.Run();
+    Check((memory.MemoryRead32(0xFFC00F68) & 9) == 8,
+          "zero X_COUNT represents 65536 elements and source stalls on its FIFO");
+    memory.MemoryWrite32(0xFFC00F04, destination);
+    memory.MemoryWrite32(0xFFC00F10, 0);
+    memory.MemoryWrite32(0xFFC00F14, 4);
+    memory.MemoryWrite32(0xFFC00F28, 3);
+    memory.MemoryWrite32(0xFFC00F08, 0x8B);
+
+    memory.MemoryWrite16(0x100, 0x0020);
+    cpu.SetPC(0x100);
+    cpu.Run();
+    std::vector<u8> actual(expected.size());
+    memory.MemoryRead(destination, actual.data(), static_cast<int>(actual.size()));
+    Check(actual == expected, "finite stop-mode MDMA0 drains the source FIFO");
+    Check(!cpu.IsIdle() && !cpu.UnsupportedIdle() && cpu.PC() == 0x102,
+          "finite stop-mode MDMA0 completion wakes IDLE");
+    Check((memory.MemoryRead32(0xFFC00F28) & 9) == 1 &&
+          (memory.MemoryRead32(0xFFC00160) & (1u << 10)) != 0,
+          "MDMA0 destination completion sets DONE and SIC source 42");
+    memory.MemoryWrite32(0xFFC00F28, 1);
+    Check((memory.MemoryRead32(0xFFC00160) & (1u << 10)) == 0,
+          "MDMA0 DONE W1C deasserts SIC source 42");
+}
+
 void CpuExposure() {
     BlackFinCpu cpu;
     cpu.AttachNandFlash(std::make_shared<IdleNand>());
@@ -524,6 +586,7 @@ int main() {
     NandResetIdleWake();
     NandPageReadIdleWake();
     NandPageReadDmaIdleWake();
+    MdmaIdleWake();
     CpuExposure();
     std::puts("execution accounting: all runtime packet-entry cases passed");
 }

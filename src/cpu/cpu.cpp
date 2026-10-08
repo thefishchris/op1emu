@@ -54,6 +54,8 @@ static constexpr int IRQ_DMA0 = 15;
 static constexpr int IRQ_DMA1 = 28;
 static constexpr int IRQ_DMA2 = 30;
 static constexpr int IRQ_DMA3 = 16;
+static constexpr int IRQ_MDMA0 = 42;
+static constexpr int IRQ_MDMA1 = 43;
 static constexpr int IRQ_RTC = 14;
 static constexpr int IRQ_NFC = 48;
 static constexpr int IRQ_USB_INT0 = 52;
@@ -211,6 +213,10 @@ BlackFinCpu::BlackFinCpu() : pc(0) {
     dma->BindInterrupt(1, IRQ_DMA1, irqHandler);
     dma->BindInterrupt(2, IRQ_DMA2, irqHandler);
     dma->BindInterrupt(3, IRQ_DMA3, irqHandler);
+    dma->BindInterrupt(12, IRQ_MDMA0, irqHandler);
+    dma->BindInterrupt(13, IRQ_MDMA0, irqHandler);
+    dma->BindInterrupt(14, IRQ_MDMA1, irqHandler);
+    dma->BindInterrupt(15, IRQ_MDMA1, irqHandler);
     std::shared_ptr<GPIO> portF = std::make_shared<GPIO>("PORTF", 0xFFC00700);
     portF->BindInterruptA(IRQ_PORTF_A, irqHandler);
     portF->BindInterruptB(IRQ_PORTF_B, irqHandler);
@@ -495,6 +501,7 @@ void BlackFinCpu::ServiceIdle() {
     if (pll_->Unsupported()) { ReportUnsupportedIdle(pll_->Unsupported()); return; }
     nfc->ServiceIdleCompletion();
     if (nfc->PageReadDMAReady()) dma->ServiceIdleNFCReadCompletion();
+    dma->ServiceIdleMDMACompletion();
     if (!pll_->WakeAsserted() && !sic->WakePending()) {
         if (const auto deadline = pll_->NextDeadlineTicks()) {
             pll_->AdvanceClkin(*deadline);

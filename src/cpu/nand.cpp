@@ -18,7 +18,12 @@ NFC::NFC(u32 baseAddr) : RegisterDevice("NFC", baseAddr, 0x50) {
     FIELD(NFC_IRQSTAT, WB_EDGE, 2, 1, R(writeBufferEmptyRising), W1C(writeBufferEmptyRising));
     FIELD(NFC_IRQSTAT, RD_RDY, 3, 1, R(readDataReady), [this](u32 v) {
         if (v) {
-            readDataReady = nandFlash->IsDataReady();
+            readDataReady = false;
+            if (readDataConsumed && readRequestPending && !nandFlash->IsBusy()) {
+                readRequestPending = false;
+                readDataReady = true;
+            }
+            readDataConsumed = false;
         }
     });
     FIELD(NFC_IRQSTAT, WR_DONE, 4, 1, R(pageWriteDone), W1C(pageWriteDone));
@@ -44,7 +49,7 @@ NFC::NFC(u32 baseAddr) : RegisterDevice("NFC", baseAddr, 0x50) {
     }
 
     REG32(NFC_COUNT, 0x20);
-    FIELD(NFC_COUNT, ECCCNT, 0, 16, R(transferCount), W(transferCount));
+    FIELD(NFC_COUNT, ECCCNT, 0, 10, R(transferCount), N());
 
     REG32(NFC_RST, 0x24);
     FIELD(NFC_RST, ECC_RST, 0, 1, R(0), [this](u32 v) {
@@ -71,7 +76,11 @@ NFC::NFC(u32 baseAddr) : RegisterDevice("NFC", baseAddr, 0x50) {
 
     REG32(NFC_READ, 0x2C);
     FIELD(NFC_READ, READ_DATA, 0, 8, [this]() {
-        readData = nandFlash->ReadData();
+        if (readDataReady && !readDataConsumed) {
+            readData = nandFlash->ReadData();
+            ++transferCount;
+            readDataConsumed = true;
+        }
         return readData;
     }, N());
 
@@ -96,7 +105,12 @@ NFC::NFC(u32 baseAddr) : RegisterDevice("NFC", baseAddr, 0x50) {
 
     REG32(NFC_DATA_RD, 0x4C);
     NFC_DATA_RD.writeCallback = [this](u32 v) {
-        readDataReady = nandFlash->IsDataReady();
+        if (readDataReady || nandFlash->IsBusy()) {
+            readRequestPending = true;
+        } else {
+            readDataReady = true;
+            readDataConsumed = false;
+        }
         UpdateInterrupts();
     };
 }
@@ -216,7 +230,11 @@ void NFC::ProcessWithInterrupt(int ivg) {
     nandFlash->CompletePendingReset();
     nandFlash->CompletePendingPageRead();
     SetNotBusy(!nandFlash->IsBusy());
-    readDataReady = nandFlash->IsDataReady();
+    if (readRequestPending && !readDataReady && !nandFlash->IsBusy()) {
+        readRequestPending = false;
+        readDataReady = true;
+        readDataConsumed = false;
+    }
     UpdateInterrupts();
 }
 
