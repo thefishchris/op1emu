@@ -1,6 +1,7 @@
 #pragma once
 
 #include "emu.h"
+#include "guest_clock.h"
 #include <atomic>
 #include <memory>
 #include <vector>
@@ -65,6 +66,11 @@ public:
     bool IsIdle() const;
     uint64_t IdleEntryCount() const;
     bool UnsupportedIdle() const { return unsupportedIdle_; }
+    // Experimental guest-clock mode (OP1EMU_EXPERIMENTAL_GUEST_CLOCK=1); see
+    // docs/guest-clock-architecture.md. Fixed at construction.
+    bool GuestClockMode() const { return guestClockMode_; }
+    GuestCostModel GuestClockCostModel() const { return guestCostModel_; }
+    const GuestClock& GuestTime() const { return guestClock_; }
     bool Failed() const { return failed_.load(std::memory_order_acquire); }
     BF524PLL& ClockState() { return *pll_; }
     struct AwakePLLStats { uint64_t consumed = 0, overshoot = 0, blocks = 0, expiries = 0; };
@@ -91,6 +97,10 @@ protected:
     void ServiceIdle();
     void ReportUnsupportedIdle(const char* reason);
 
+    // Declared before the devices, which may keep a reference to it.
+    GuestClock guestClock_;
+    bool guestClockMode_ = false;
+    GuestCostModel guestCostModel_ = GuestCostModel::MinCost;
     std::shared_ptr<SIC> sic;
     std::shared_ptr<CoreTimer> coreTimer;
     std::shared_ptr<BF524PLL> pll_;

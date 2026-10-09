@@ -130,3 +130,16 @@ std::optional<uint64_t> BF524PLL::SystemHz() const {
     // HR 18-5: hardware raises effective SSEL to at least the CCLK divider.
     return vco / std::max<u32>(div_ & 15, 1u << ((div_ >> 4) & 3));
 }
+
+std::optional<ClockRatios> BF524PLL::Ratios() const {
+    if (unsupported_) return std::nullopt;
+    if (temporaryBypass_) return ClockRatios{};
+    if (!activeCtl_) return std::nullopt;
+    if (*activeCtl_ & 0x100) return ClockRatios{};
+    if (!(div_ & 15)) return std::nullopt;
+    const u32 msel = (*activeCtl_ >> 9) & 63;
+    const u32 df = (*activeCtl_ & 1) ? 2u : 1u;
+    const u32 cdiv = 1u << ((div_ >> 4) & 3);
+    // Same derivation as CoreHz()/SystemHz(), including the raised SSEL.
+    return ClockRatios{msel ? msel : 64u, df * cdiv, df * std::max<u32>(div_ & 15u, cdiv)};
+}

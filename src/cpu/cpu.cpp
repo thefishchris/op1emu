@@ -6,6 +6,7 @@
 #include "sic.h"
 #include "coretimer.h"
 #include "pll.h"
+#include "guest_clock.h"
 #include "otp.h"
 #include "gptimer.h"
 #include "dma.h"
@@ -126,6 +127,24 @@ BlackFinCpu::BlackFinCpu() : pc(0) {
             LogInfo("Shadow timing enabled: observational issue baseline + documented penalties; no device time conversion");
         }
     }
+
+    if (const char* value = std::getenv("OP1EMU_EXPERIMENTAL_GUEST_CLOCK")) {
+        if (std::strcmp(value, "1") != 0 && std::strcmp(value, "0") != 0)
+            throw std::invalid_argument("OP1EMU_EXPERIMENTAL_GUEST_CLOCK must be 0 or 1");
+        guestClockMode_ = std::strcmp(value, "1") == 0;
+    }
+    if (const char* value = std::getenv("OP1EMU_GUEST_CLOCK_COST")) {
+        if (std::strcmp(value, "shadow-estimate") == 0) guestCostModel_ = GuestCostModel::ShadowEstimate;
+        else if (std::strcmp(value, "min-cost") != 0)
+            throw std::invalid_argument("OP1EMU_GUEST_CLOCK_COST must be min-cost or shadow-estimate");
+        if (guestCostModel_ == GuestCostModel::ShadowEstimate && !shadowTiming_)
+            throw std::invalid_argument("OP1EMU_GUEST_CLOCK_COST=shadow-estimate requires OP1EMU_SHADOW_TIMING=1");
+    }
+    if (guestClockMode_)
+        LogInfo("Guest clock EXPERIMENTAL: CLKIN-based, cost-model=%s (%s; not cycle accurate); "
+                "observational only: every device stays on its existing time source",
+                GuestCostModelName(guestCostModel_),
+                guestCostModel_ == GuestCostModel::MinCost ? "ASSUMED one CCLK per packet entry, lower bound" : "observational shadow estimate");
 
     auto irqHandler = [this](int q, int level) { this->ProcessInterrupt(q, level); };
     uint64_t experimentalClkin = 0;
@@ -389,6 +408,20 @@ HaltReason BlackFinCpu::Run() {
     const uint64_t unknownBefore = advanceAwakeBypass ? shadowTiming_->unknown_packets : 0;
     const uint64_t fixedUnknownBefore = advanceAwakeBypass ? shadowTiming_->unknown_fixed_packets : 0;
     const u32 blockPC = cpuState_->pc;
+    // Guest clock: ratios in force at block start apply to the whole block.
+    if (guestClockMode_) {
+        const auto ratios = pll_->Ratios();
+        if (ratios != guestClock_.Ratios()) {
+            LogInfo("guest-clock ratios known=%u units-per-clkin=%u cclk-units=%u sclk-units=%u clkin=%llu cclk=%llu",
+                    ratios ? 1u : 0u, ratios ? ratios->unitsPerClkin : 0u, ratios ? ratios->cclkUnits : 0u,
+                    ratios ? ratios->sclkUnits : 0u, static_cast<unsigned long long>(guestClock_.ClkinTicks()),
+                    static_cast<unsigned long long>(guestClock_.CclkCycles()));
+            guestClock_.SetRatios(ratios);
+        }
+    }
+    const uint64_t guestPacketsBefore = cpuState_->packet_entries;
+    const uint64_t guestShadowBefore =
+        guestCostModel_ == GuestCostModel::ShadowEstimate && shadowTiming_ ? shadowTiming_->EstimatedCycles() : 0;
     if (!ExecuteCoreBlock(cpuState_->pc)) {
         LogError("JIT execution failed at PC %08X", cpuState_->pc);
         failed_.store(true, std::memory_order_release);
@@ -418,6 +451,14 @@ HaltReason BlackFinCpu::Run() {
         }
     }
     cpuState_->did_jump = false; // Clear jump flag set by bcore, since we handle it in the emulator loop
+    if (guestClockMode_) {
+        // Awake work of this call only, including a terminal IDLE's own entry.
+        // packet_entries is cumulative and wraps modulo 2^64, so the delta does too.
+        const uint64_t packets = cpuState_->packet_entries - guestPacketsBefore;
+        const uint64_t cost = guestCostModel_ == GuestCostModel::ShadowEstimate
+            ? shadowTiming_->EstimatedCycles() - guestShadowBefore : packets;
+        guestClock_.AdvanceAwakeCclk(cost);
+    }
     if (cpuState_->idle) {
         LogInfo("idle-enter pc=%08X resume=%08X packets=%llu entries=%llu host-us=%lld",
                 cpuState_->idle_pc, cpuState_->pc,
@@ -510,6 +551,11 @@ void BlackFinCpu::ServiceIdle() {
     dma->ServiceIdleMDMACompletion();
     if (!pll_->WakeAsserted() && !sic->WakePending()) {
         if (const auto deadline = pll_->NextDeadlineTicks()) {
+            if (guestClockMode_) {
+                // The existing CONFIRMED CLKIN-domain lock countdown (E5); CCLK is held.
+                guestClock_.SetRatios(pll_->Ratios());
+                guestClock_.AdvanceIdleClkin(*deadline);
+            }
             pll_->AdvanceClkin(*deadline);
             LogInfo("pll-deadline elapsed-clkin=%llu total-clkin=%llu ctl=%04X active=%04X div=%04X stat=%04X provisional-cclk=%llu provisional-sclk=%llu",
                     static_cast<unsigned long long>(*deadline), static_cast<unsigned long long>(pll_->ClkinTicks()),

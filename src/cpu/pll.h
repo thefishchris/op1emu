@@ -1,6 +1,7 @@
 #pragma once
 
 #include "io.h"
+#include "guest_clock.h"
 #include <optional>
 
 // BF52x HR 18-5, 18-14/15, figures 18-4,6,7,8,10. BF524 only.
@@ -21,6 +22,9 @@ public:
     uint64_t ProvisionalClkinHz() const { return clkinHz_; }
     std::optional<uint64_t> CoreHz() const;
     std::optional<uint64_t> SystemHz() const;
+    // Register-determined CCLK/SCLK ratios to CLKIN (HR 18-3..18-5), independent
+    // of any absolute CLKIN frequency; nullopt while the active state is unknown.
+    std::optional<ClockRatios> Ratios() const;
     u32 Status() const;
     struct AwakeAdvance { uint64_t consumed = 0, overshoot = 0; bool expired = false; };
     bool CanAdvanceAwakeBypass(bool experimentEnabled) const;
