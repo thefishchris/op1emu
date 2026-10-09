@@ -25,6 +25,8 @@ enum RegIndex {
 
 class SIC;
 class CoreTimer;
+class GuestCoreTimer;
+class RegisterDevice;
 class BF524PLL;
 class GPIO;
 class PPI;
@@ -66,11 +68,14 @@ public:
     bool IsIdle() const;
     uint64_t IdleEntryCount() const;
     bool UnsupportedIdle() const { return unsupportedIdle_; }
+    const char* UnsupportedIdleReason() const { return unsupportedIdleReason_; }
     // Experimental guest-clock mode (OP1EMU_EXPERIMENTAL_GUEST_CLOCK=1); see
     // docs/guest-clock-architecture.md. Fixed at construction.
     bool GuestClockMode() const { return guestClockMode_; }
     GuestCostModel GuestClockCostModel() const { return guestCostModel_; }
     const GuestClock& GuestTime() const { return guestClock_; }
+    // Guest-clock mode only; null otherwise.
+    GuestCoreTimer* GuestTimer() const { return guestCoreTimer_.get(); }
     bool Failed() const { return failed_.load(std::memory_order_acquire); }
     BF524PLL& ClockState() { return *pll_; }
     struct AwakePLLStats { uint64_t consumed = 0, overshoot = 0, blocks = 0, expiries = 0; };
@@ -96,15 +101,20 @@ protected:
     void ProcessEvents();
     void ServiceIdle();
     void ReportUnsupportedIdle(const char* reason);
+    void ReportHeldDomainIdle();
 
     // Declared before the devices, which may keep a reference to it.
     GuestClock guestClock_;
     bool guestClockMode_ = false;
     GuestCostModel guestCostModel_ = GuestCostModel::MinCost;
     std::shared_ptr<SIC> sic;
-    std::shared_ptr<CoreTimer> coreTimer;
+    // MMR view of whichever core timer is active (diagnostics read it).
+    std::shared_ptr<RegisterDevice> coreTimer;
+    std::shared_ptr<CoreTimer> legacyCoreTimer_;      // Default mode.
+    std::shared_ptr<GuestCoreTimer> guestCoreTimer_;  // Guest-clock mode.
     std::shared_ptr<BF524PLL> pll_;
     bool unsupportedIdle_ = false;
+    const char* unsupportedIdleReason_ = nullptr;
     std::atomic<bool> failed_{false};
     bool awakePLLExperiment_ = false;
     AwakePLLStats awakePLLStats_;

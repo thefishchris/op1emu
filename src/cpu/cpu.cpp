@@ -7,6 +7,7 @@
 #include "coretimer.h"
 #include "pll.h"
 #include "guest_clock.h"
+#include "guest_coretimer.h"
 #include "otp.h"
 #include "gptimer.h"
 #include "dma.h"
@@ -141,8 +142,8 @@ BlackFinCpu::BlackFinCpu() : pc(0) {
             throw std::invalid_argument("OP1EMU_GUEST_CLOCK_COST=shadow-estimate requires OP1EMU_SHADOW_TIMING=1");
     }
     if (guestClockMode_)
-        LogInfo("Guest clock EXPERIMENTAL: CLKIN-based, cost-model=%s (%s; not cycle accurate); "
-                "observational only: every device stays on its existing time source",
+        LogInfo("Guest clock EXPERIMENTAL: CLKIN-based, cost-model=%s (%s; not cycle accurate); core timer on guest CCLK while awake; "
+                "CCLK-core held in plain IDLE (UNKNOWN); CYCLES, SPORT, RTC, panel TE and GP timers stay on host time",
                 GuestCostModelName(guestCostModel_),
                 guestCostModel_ == GuestCostModel::MinCost ? "ASSUMED one CCLK per packet entry, lower bound" : "observational shadow estimate");
 
@@ -258,14 +259,25 @@ BlackFinCpu::BlackFinCpu() : pc(0) {
         }
     });
     devices.push_back(sic);
-    coreTimer = std::make_shared<CoreTimer>(0xFFE03000);
-    coreTimer->BindInterrupt(IVG_IVTMR, [this](int ivg, int level) {
-        if (level) {
-            QueueEvent([this, ivg]() {
-                cec_raise(cpuState_.get(), ivg);
-            });
-        }
-    });
+    if (guestClockMode_) {
+        guestCoreTimer_ = std::make_shared<GuestCoreTimer>(0xFFE03000, guestClock_);
+        // Edge request straight to the CEC latch (HRM 11-3). Sync() runs on the
+        // CPU thread between blocks, so no event-queue delay is added.
+        guestCoreTimer_->BindInterrupt(IVG_IVTMR, [this](int ivg, int level) {
+            if (level) cec_raise(cpuState_.get(), ivg);
+        });
+        coreTimer = guestCoreTimer_;
+    } else {
+        legacyCoreTimer_ = std::make_shared<CoreTimer>(0xFFE03000);
+        legacyCoreTimer_->BindInterrupt(IVG_IVTMR, [this](int ivg, int level) {
+            if (level) {
+                QueueEvent([this, ivg]() {
+                    cec_raise(cpuState_.get(), ivg);
+                });
+            }
+        });
+        coreTimer = legacyCoreTimer_;
+    }
     devices.emplace_back(coreTimer);
 
     std::shared_ptr<TWI> twi = std::make_shared<TWI>(0xFFC01400);
@@ -396,7 +408,7 @@ HaltReason BlackFinCpu::Run() {
     auto cyclesElapsed = microSecondsElapsed * 400; // assuming 400MHz CPU clock
     // Sync cycles with system time
     SetBfinCycles(*cpuState_, cyclesElapsed);
-    coreTimer->UpdateCycles(cyclesElapsed);
+    if (legacyCoreTimer_) legacyCoreTimer_->UpdateCycles(cyclesElapsed);
 
     // Hit entry point, invalidating core to reset cached translations
     if (cpuState_->pc == 0xFFA00000) {
@@ -458,6 +470,8 @@ HaltReason BlackFinCpu::Run() {
         const uint64_t cost = guestCostModel_ == GuestCostModel::ShadowEstimate
             ? shadowTiming_->EstimatedCycles() - guestShadowBefore : packets;
         guestClock_.AdvanceAwakeCclk(cost);
+        // After did_jump is cleared: cec_raise drops a latch while it is set.
+        guestCoreTimer_->Sync();
     }
     if (cpuState_->idle) {
         LogInfo("idle-enter pc=%08X resume=%08X packets=%llu entries=%llu host-us=%lld",
@@ -550,6 +564,12 @@ void BlackFinCpu::ServiceIdle() {
     if (nfc->PageReadDMAReady()) dma->ServiceIdleNFCReadCompletion();
     dma->ServiceIdleMDMACompletion();
     if (!pll_->WakeAsserted() && !sic->WakePending()) {
+        // Guest clock: time must not pass across a running device whose clock
+        // domain has UNKNOWN plain-IDLE behavior (architecture D4/D6).
+        if (guestClockMode_ && guestCoreTimer_->Counting()) {
+            ReportHeldDomainIdle();
+            return;
+        }
         if (const auto deadline = pll_->NextDeadlineTicks()) {
             if (guestClockMode_) {
                 // The existing CONFIRMED CLKIN-domain lock countdown (E5); CCLK is held.
@@ -583,8 +603,30 @@ void BlackFinCpu::ServiceIdle() {
                           "no known eligible wake completion or deterministic deadline");
 }
 
+void BlackFinCpu::ReportHeldDomainIdle() {
+    const auto& ratios = guestClock_.Ratios();
+    const auto expiry = guestCoreTimer_->NextExpiryCclk();
+    const auto expiryClkin = expiry ? guestClock_.ClkinTickForCclk(*expiry) : std::nullopt;
+    LogWarn("guest-clock idle-hold device=coretimer domain=cclk-core idle-state=plain-idle classification=UNKNOWN "
+            "(docs/guest-clock-architecture.md D6): no wake, no deadline advance, no host-time fallback");
+    LogWarn("guest-clock state clkin=%llu cclk=%llu sclk=%llu cclk-without-ratio=%llu alignments=%llu ratio-known=%u "
+            "units-per-clkin=%u cclk-units=%u sclk-units=%u cost-model=%s",
+            static_cast<unsigned long long>(guestClock_.ClkinTicks()), static_cast<unsigned long long>(guestClock_.CclkCycles()),
+            static_cast<unsigned long long>(guestClock_.SclkCycles()), static_cast<unsigned long long>(guestClock_.CclkWithoutRatio()),
+            static_cast<unsigned long long>(guestClock_.RatioAlignments()), ratios ? 1u : 0u,
+            ratios ? ratios->unitsPerClkin : 0u, ratios ? ratios->cclkUnits : 0u, ratios ? ratios->sclkUnits : 0u,
+            GuestCostModelName(guestCostModel_));
+    const std::string expiryClkinText = expiryClkin ? std::to_string(*expiryClkin) : std::string("unknown");
+    LogWarn("guest-coretimer tcntl=%X tperiod=%08X tscale=%02X tcount=%08X expiries=%llu next-expiry-cclk=%llu next-expiry-clkin=%s (ineligible)",
+            guestCoreTimer_->Read32(0), guestCoreTimer_->Read32(4), guestCoreTimer_->Read32(8), guestCoreTimer_->Read32(12),
+            static_cast<unsigned long long>(guestCoreTimer_->Expiries()), static_cast<unsigned long long>(expiry.value_or(0)),
+            expiryClkinText.c_str());
+    ReportUnsupportedIdle("held-domain-active device=coretimer domain=cclk-core idle-state=plain-idle");
+}
+
 void BlackFinCpu::ReportUnsupportedIdle(const char* reason) {
     unsupportedIdle_ = true;
+    unsupportedIdleReason_ = reason;
     LogWarn("idle-unsupported reason=%s idle=%u pc=%08X resume=%08X packets=%llu entries=%llu rets=%08X reti=%08X seqstat=%08X ivg=%d",
             reason, cpuState_->idle ? 1u : 0u, cpuState_->idle_pc, cpuState_->pc,
             static_cast<unsigned long long>(cpuState_->packet_entries),
