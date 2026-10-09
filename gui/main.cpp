@@ -13,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
+#include <string>
 
 std::atomic<bool> cpuShouldStop(false);
 
@@ -65,8 +66,16 @@ void BootExcutionThread(BlackFinCpu& cpu) {
 }
 
 int main(int argc, char* argv[]) {
-    if (argc < 2) {
-        std::cerr << "Usage: " << argv[0] << " <nand_flash_file> [ldr_file]" << std::endl;
+    bool nandSnapshot = false;
+    std::vector<std::string> positional;
+    for (int i = 1; i < argc; ++i) {
+        const std::string argument = argv[i];
+        if (argument == "--nand-snapshot") nandSnapshot = true;
+        else if (argument == "--nand-rw") nandSnapshot = false;
+        else positional.push_back(argument);
+    }
+    if (positional.empty() || positional.size() > 2) {
+        std::cerr << "Usage: " << argv[0] << " <nand_flash_file> [ldr_file] [--nand-snapshot|--nand-rw]" << std::endl;
         return 1;
     }
 
@@ -81,29 +90,34 @@ int main(int argc, char* argv[]) {
     cpu.AttachAudioOutput(audioOutput);
     cpu.SetBootMode(0x0D); // Set BMODE to 0b1101, boot from NAND flash with port H
 
-    auto loop = uvw::loop::get_default();
-    std::thread uvloop([loop]() {
-        while (true) {
-            loop->run();
-        }
-    });
-    USBIPServer usbipd(*loop, cpu.GetUSB());
-    usbipd.Start();
-
     // Load LDR file
     LDRParser parser;
-    if (argc > 2 && !parser.loadFile(argv[2])) {
-        std::cerr << "Failed to load LDR file: " << argv[2] << std::endl;
+    if (positional.size() > 1 && !parser.loadFile(positional[1])) {
+        std::cerr << "Failed to load LDR file: " << positional[1] << std::endl;
         return 1;
     }
 
     // Load NAND Flash underlying storage
-    auto nandFlash = std::make_shared<MT29F4G08>(cpu, argv[1]);
+    std::shared_ptr<MT29F4G08> nandFlash;
+    try {
+        nandFlash = std::make_shared<MT29F4G08>(cpu, positional[0], nandSnapshot);
+    } catch (const std::exception& error) {
+        LogError("%s", error.what());
+        return 1;
+    }
     cpu.AttachNandFlash(nandFlash);
+    if (nandSnapshot) LogInfo("NAND snapshot: source read-only; guest changes discarded on exit");
+
+    auto loop = uvw::loop::get_default();
+    std::thread uvloop([loop]() {
+        while (true) loop->run();
+    });
+    USBIPServer usbipd(*loop, cpu.GetUSB());
+    usbipd.Start();
 
     // Start CPU execution thread
     std::thread cpuThread;
-    if (argc > 2) {
+    if (positional.size() > 1) {
         cpuThread = std::thread(LdrExecutionThread, std::ref(cpu), std::ref(parser));
     } else {
         // If no LDR file is provided, just run the CPU without loading any code

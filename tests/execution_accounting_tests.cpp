@@ -513,6 +513,7 @@ void NandPageReadDmaIdleWake() {
 }
 
 #include "nand_random_read_cases.h"
+#include "nand_snapshot_cases.h"
 #include "mdma_2d_cases.h"
 
 void MdmaIdleWake() {
@@ -591,6 +592,7 @@ int main() {
     NandPageReadIdleWake();
     NandPageReadDmaIdleWake();
     NandRandomReadAvailability();
+    NandSnapshotStorage();
     Finite2DMdmaCompletion();
     MdmaIdleWake();
     CpuExposure();

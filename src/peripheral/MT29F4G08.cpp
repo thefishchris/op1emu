@@ -3,6 +3,7 @@
 #include "utils/log.h"
 #include <cstring>
 #include <algorithm>
+#include <stdexcept>
 
 // MT29F4G08 specifications
 static constexpr u32 PAGE_SIZE = 2048;
@@ -58,14 +59,21 @@ static constexpr u8 ID_ONFI[] = {
     0xFF,
 };
 
-MT29F4G08::MT29F4G08(BlackFinCpu& cpu, const std::string& storagePath)
+MT29F4G08::MT29F4G08(BlackFinCpu& cpu, const std::string& storagePath, bool snapshot)
     : cpu(cpu)
     , storagePath(storagePath)
+    , snapshot_(snapshot)
     , pageBuffer(PAGE_TOTAL_SIZE, ERASED_VALUE)
     , programBuffer(PAGE_TOTAL_SIZE, ERASED_VALUE)
     , statusRegister(NandStatus::Ready | NandStatus::WriteEnabled)
 {
     // Try to open existing file, or create new one
+    if (snapshot_) {
+        storageFile.open(storagePath, std::ios::in | std::ios::binary);
+        if (!storageFile.is_open())
+            throw std::runtime_error("Cannot open NAND snapshot source: " + storagePath);
+        return;
+    }
     storageFile.open(storagePath, std::ios::in | std::ios::out | std::ios::binary);
     if (!storageFile.is_open()) {
         // Create new file
@@ -308,6 +316,14 @@ void MT29F4G08::LoadPage(u32 pageNumber) {
         return;
     }
 
+    if (snapshot_) {
+        const auto page = dirtyPages_.find(pageNumber);
+        if (page != dirtyPages_.end()) {
+            pageBuffer = page->second;
+            return;
+        }
+    }
+
     if (!storageFile.is_open()) {
         std::fill(pageBuffer.begin(), pageBuffer.end(), ERASED_VALUE);
         return;
@@ -344,6 +360,11 @@ void MT29F4G08::SavePage(u32 pageNumber) {
     // Apply program operation (AND with program buffer - can only clear bits)
     for (u32 i = 0; i < PAGE_TOTAL_SIZE; ++i) {
         pageBuffer[i] &= programBuffer[i];
+    }
+
+    if (snapshot_) {
+        dirtyPages_[pageNumber] = pageBuffer;
+        return;
     }
 
     // Write page data
@@ -384,6 +405,14 @@ void MT29F4G08::ExecuteErase() {
     u32 blockNumber = GetBlockAddress();
 
     if (blockNumber >= TOTAL_BLOCKS) {
+        return;
+    }
+
+    if (snapshot_) {
+        const std::vector<u8> erased(PAGE_TOTAL_SIZE, ERASED_VALUE);
+        const u32 firstPage = blockNumber * PAGES_PER_BLOCK;
+        for (u32 page = firstPage; page < firstPage + PAGES_PER_BLOCK; ++page)
+            dirtyPages_[page] = erased;
         return;
     }
 

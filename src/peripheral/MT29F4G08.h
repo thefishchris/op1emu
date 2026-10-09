@@ -3,12 +3,14 @@
 #include "cpu/nand.h"
 #include <vector>
 #include <fstream>
+#include <unordered_map>
 
 class BlackFinCpu;
 
 class MT29F4G08 : public NandFlash {
 public:
-    MT29F4G08(BlackFinCpu& cpu, const std::string& storagePath);
+    // Snapshot writes/erases are visible to the guest but never modify the backing image.
+    MT29F4G08(BlackFinCpu& cpu, const std::string& storagePath, bool snapshot = false);
     ~MT29F4G08();
 
     void SendCommand(u8 command) override;
@@ -43,6 +45,8 @@ protected:
     BlackFinCpu& cpu;
     std::string storagePath;
     std::fstream storageFile;
+    bool snapshot_ = false;
+    std::unordered_map<u32, std::vector<u8>> dirtyPages_;
     std::vector<u8> pageBuffer;
     std::vector<u8> programBuffer;
 
