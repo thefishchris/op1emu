@@ -66,3 +66,65 @@ self-checking ELF cases pass through the existing `emu` executable. The external
 assembled matrix could not be built because the Blackfin cross toolchain is
 absent; no result is claimed for it. Parent execution_accounting_tests and all
 nine focused tests, relinked against this Bcore, pass.
+
+## Headless / fail-fast — 2d82cd4 and d6d1d36
+
+Exact audited commits:
+`2d82cd43f40974b81fc955c40021fbc5a608aeab` and
+`d6d1d36e6b9c68a0692e5d6c8d46c264b3c71204`.
+
+Adopted frontend contracts: shared JSON key wiring; bounded nonblocking line
+input with partial-line/EOF support; press/release/tap/wait/quit; pinned sensors;
+full-frame coverage tracking; preserving partial frames on same-geometry
+reinitialization; clockwise RGB565 PPM capture; and frame-count waits with host
+observation timeouts. Core::run false now latches `BlackFinCpu::Failed()` and
+skips device processing. Failure is not retried; GUI execution threads stop and
+return nonzero. Real architectural IDLE, including an unsupported wake condition,
+does not set Failed. A protected execution-result seam permits testing the real
+Run path without treating guest exceptions as artificial JIT failures.
+
+Adaptations: `op1emu-headless` is independently buildable without linking the
+GUI/audio/cqueue backend; GUI `--headless` forwards to the same runner. Headless
+execution is initially single-threaded, uses the existing platform/display/key
+interfaces, and opens no window, audio device, or USB/IP server. The guest USB
+controller is still present, with no external host connection fabricated.
+Unlike upstream, headless NAND defaults to snapshot; `--nand-rw` is explicit.
+Screenshots require new output paths instead of overwriting existing files.
+Framebuffer allocation has an explicit host resource bound. Optional runtime
+bounds, stop-at-unsupported-IDLE, and screenshot-on-stop make existing boundary
+observations scriptable; an unsupported IDLE is reported separately from JIT
+failure. GPIO frame callbacks retain the existing host frontend cadence; there
+is no new sleep or guest-time conversion. Monotonic frontend deadlines measure
+host input/observation bounds only, not device/core time.
+
+Omitted: upstream's detached forever-running USB thread, broad main rewrite,
+host-thread/sleep scaffolding, and all timing/profiling changes. GUI shutdown
+instead uses a host libuv async stop and joins its existing loop thread, avoiding
+both std::terminate and a detached thread outliving guest devices. Sensor script
+behavior is opt-in; the existing GUI random sensor feed remains unchanged.
+No TimeSource, GP/CoreTimer clock change, guest CYCLES rewrite, scheduler redesign,
+one-cycle-per-packet clock, upstream pointer, or O1 IR pipeline is introduced.
+
+Tests: headless unit cases cover parsing, malformed/partial input, EOF, key
+mapping and queued platform input, sensor values, complete-frame coverage,
+same-geometry reinitialization, RGB565 rotation, exclusive screenshots, and
+frame-wait success/timeout. CLI cases cover help, clean quit, malformed commands,
+missing snapshot sources, and frame timeout. Failure regression checks false
+backend result, unchanged PC/packet count, skipped device callbacks, no retry,
+and real IDLE remaining nonfailed. All nine established focused tests and both
+new headless targets pass. Exact staged headless executable/library and four
+staged test targets pass in an isolated worktree. These tests do not require
+proprietary firmware; the headless executable avoids the pre-existing unstaged
+cqueue include fix needed by the GUI target on this compiler.
+
+**CONFIRMED headless v241:** pinned-sensor script waited for the first real
+frame and captured the startup display. The stop-on-IDLE runner captured normal
+tape UI as a 400x200 PPM, returned **0**, and stopped at known `019F18F4`
+(resume `019F18F6`), packets 1,353,315,222, frames 184. Host CPU runtime
+311.312 seconds is metadata only. No JIT failure was reported and no continuation
+through the known power-manager boundary occurred. Frozen NAND and copied OTP
+hashes remained the same as above. Private evidence is under
+`/tmp/opencode/headless-port-boot.*`, `headless-startup.ppm`, and
+`headless-tape.ppm/.png`.
+
+See `docs/headless-regression.md` for invocation and exit-code contracts.

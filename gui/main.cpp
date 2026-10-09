@@ -6,6 +6,7 @@
 #include "glfw_display.h"
 #include "audio_output_miniaudio.h"
 #include "usbipd.h"
+#include "headless.h"
 #include <vector>
 #include <iostream>
 #include <memory>
@@ -37,6 +38,7 @@ void LdrExecutionThread(BlackFinCpu& cpu, const LDRParser& parser) {
 
         while (!cpuShouldStop.load()) {
             cpu.Run();
+            if (cpu.Failed()) { cpuShouldStop.store(true); break; }
 
             if (cpu.PC() == 0x8000000) {
                 LogInfo("Finished executing DXE");
@@ -61,11 +63,14 @@ void BootExcutionThread(BlackFinCpu& cpu) {
     cpu.SetPC(0xEF000000); // Boot entry point
     while (!cpuShouldStop.load()) {
         cpu.Run();
+        if (cpu.Failed()) { cpuShouldStop.store(true); break; }
     }
     LogInfo("CPU thread exiting");
 }
 
 int main(int argc, char* argv[]) {
+    for (int i = 1; i < argc && std::string(argv[i]) != "--"; ++i)
+        if (std::string(argv[i]) == "--headless") return RunHeadlessEmulator(argc, argv);
     bool nandSnapshot = false;
     std::vector<std::string> positional;
     for (int i = 1; i < argc; ++i) {
@@ -109,11 +114,11 @@ int main(int argc, char* argv[]) {
     if (nandSnapshot) LogInfo("NAND snapshot: source read-only; guest changes discarded on exit");
 
     auto loop = uvw::loop::get_default();
-    std::thread uvloop([loop]() {
-        while (true) loop->run();
-    });
+    auto shutdown = loop->resource<uvw::async_handle>();
+    shutdown->on<uvw::async_event>([loop](const auto&, auto&) { loop->stop(); });
     USBIPServer usbipd(*loop, cpu.GetUSB());
     usbipd.Start();
+    std::thread uvloop([loop]() { while (!cpuShouldStop.load()) loop->run(); });
 
     // Start CPU execution thread
     std::thread cpuThread;
@@ -125,7 +130,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Main thread handles GLFW display
-    while (!display->ShouldClose()) {
+    while (!cpuShouldStop.load() && !display->ShouldClose()) {
         display->PollEvents();
         int16_t ax = static_cast<int16_t>((std::rand() % (540 - 50 + 1)) + 50); // ax in [50, 540]
         int16_t ay = static_cast<int16_t>((std::rand() % (-50 - (-540) + 1)) + (-540)); // ay in [-540, -50]
@@ -141,6 +146,8 @@ int main(int argc, char* argv[]) {
     LogInfo("Stopping CPU thread...");
     cpuShouldStop.store(true);
     cpuThread.join();
+    shutdown->send();
+    uvloop.join();
 
-    return 0;
+    return cpu.Failed() ? 1 : 0;
 }

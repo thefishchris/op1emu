@@ -360,6 +360,7 @@ static void SetBfinCycles(CpuState& cpu_state, u64 cycles) {
 }
 
 HaltReason BlackFinCpu::Run() {
+    if (Failed()) return HaltReason::Break;
     if (unsupportedIdle_) return HaltReason::Break;
     if (cpuState_->idle) {
         ServiceIdle();
@@ -388,7 +389,11 @@ HaltReason BlackFinCpu::Run() {
     const uint64_t unknownBefore = advanceAwakeBypass ? shadowTiming_->unknown_packets : 0;
     const uint64_t fixedUnknownBefore = advanceAwakeBypass ? shadowTiming_->unknown_fixed_packets : 0;
     const u32 blockPC = cpuState_->pc;
-    core_->run(cpuState_->pc);
+    if (!ExecuteCoreBlock(cpuState_->pc)) {
+        LogError("JIT execution failed at PC %08X", cpuState_->pc);
+        failed_.store(true, std::memory_order_release);
+        return HaltReason::Break;
+    }
     if (advanceAwakeBypass) {
         const uint64_t delta = shadowTiming_->EstimatedCycles() - shadowBefore;
         // This call started awake. Its newly issued cycles (including a terminal
@@ -495,6 +500,7 @@ uint64_t BlackFinCpu::PacketEntryCount() const {
 }
 
 bool BlackFinCpu::IsIdle() const { return cpuState_->idle; }
+bool BlackFinCpu::ExecuteCoreBlock(u32 address) { return core_->run(address); }
 uint64_t BlackFinCpu::IdleEntryCount() const { return cpuState_->idle_entries; }
 
 void BlackFinCpu::ServiceIdle() {

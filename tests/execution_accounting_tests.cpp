@@ -515,6 +515,7 @@ void NandPageReadDmaIdleWake() {
 #include "nand_random_read_cases.h"
 #include "nand_snapshot_cases.h"
 #include "mdma_2d_cases.h"
+#include "cpu_failure_cases.h"
 
 void MdmaIdleWake() {
     BlackFinCpu cpu;
@@ -594,6 +595,7 @@ int main() {
     NandRandomReadAvailability();
     NandSnapshotStorage();
     Finite2DMdmaCompletion();
+    CpuExecutionFailure();
     MdmaIdleWake();
     CpuExposure();
     std::puts("execution accounting: all runtime packet-entry cases passed");
