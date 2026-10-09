@@ -459,9 +459,14 @@ practitioners relied on. It cannot raise the label above LIKELY by itself.
    enough to use.
 
 Outcome: ADI sources remain ambiguous (E7/E18 against E6/E16), and the only
-direct pointer toward hypothesis A is INDIRECT. **UNKNOWN is retained.** The
-`ext/bfin_sim` submodule (GNU simulator) is not checked out locally and was
-not examined. Simulator behavior would be INDIRECT in any case.
+direct pointer toward hypothesis A is INDIRECT. **UNKNOWN is retained.**
+
+Correction (2026-10-09): an earlier revision said `ext/bfin_sim` was not
+checked out. That was wrong; a shell glob error was misread. The pinned
+`ext/bfin_sim` (`08e9153`, a subset of the GNU Blackfin simulator) has been
+examined: it contains no core-timer device, and its `IDLE` handler is a no-op
+with the "timewarp to next event" code commented out. It provides no evidence
+either way.
 
 ### 6.2 Hardware experiment (authoritative)
 
@@ -548,3 +553,63 @@ Device-safety review is required before touching a real OP-1.
   guest time.
 - **Unknown reset ratio (E14):** the guest clock must handle a CCLK-only
   period before the first PLL programming without inventing a frequency.
+
+## 9. Implementation status (2026-10-09)
+
+Implemented behind `OP1EMU_EXPERIMENTAL_GUEST_CLOCK=1` (default off; default
+mode is unchanged and keeps the legacy `CoreTimer`):
+
+- **Steps 1–2 (D1, D2).** `src/cpu/guest_clock.{h,cpp}`: CLKIN master time
+  with exact sub-tick phase, CCLK/SCLK domain counts, and `ClockRatios` from
+  `BF524PLL::Ratios()` (register-only, no Hz). Ratios are sampled at block
+  start. Awake cost is the packet-entry delta per `Run()` (`min-cost`,
+  ASSUMED), or `OP1EMU_GUEST_CLOCK_COST=shadow-estimate`, which requires
+  `OP1EMU_SHADOW_TIMING=1`. The existing PLL lock countdown during IDLE (CLKIN
+  domain, E5) also advances the guest CLKIN and SCLK, with CCLK held. `CYCLES`,
+  SPORT, RTC, panel TE and GP timers are untouched and stay on host time.
+- **Step 3 (D7).** `src/cpu/guest_coretimer.{h,cpp}`: HRM chapter 11 awake
+  semantics on the guest CCLK. The header lists every ASSUMED choice; the
+  most consequential is the auto-reload period of TPERIOD × (TSCALE+1). IVTMR
+  is latched straight into the CEC after the block that reaches expiry.
+- **Part of step 4 (D4 rule 4).** In plain IDLE with the guest core timer
+  counting, `ServiceIdle()` stops with
+  `held-domain-active device=coretimer domain=cclk-core idle-state=plain-idle`.
+  It does this before any deadline is taken, including the PLL lock, and logs
+  the guest clock and core timer state. No IDLE deadline advancement through
+  the CCLK-core domain exists.
+
+### First firmware trial (v241, guest-clock mode)
+
+Inputs: snapshot NAND `c94057cb…` (unchanged) and a private copy of OTP
+`06c99349…`, with the environment of the earlier boundary trials
+(provisional CLKIN, shadow timing, PLL awake-bypass experiment, GPIO 17, audio
+divisor 10) plus the guest clock. Two runs stopped identically.
+
+- **Stop:** `PC=EF000C7A` (resume `EF000C7C`), boot ROM `bfrom_SysControl`
+  PLL programming. It writes `PLL_DIV=5` and `PLL_CTL=0x2000`, then executes
+  `IDLE` with `SIC_IWR0=1` (DPMC only); CEC IMASK/IPEND/ILAT = `C05F/8000/0`.
+  This is the boot's first PLL relock.
+- **Reason:** `held-domain-active device=coretimer domain=cclk-core
+  idle-state=plain-idle`. The core timer was already running: `TCNTL=7`,
+  `TPERIOD=0x61A80`, `TSCALE=0`, `TCOUNT=0x60E86`, next expiry at CCLK
+  29,487,134, CLKIN unknown.
+- **Guest clock:** CLKIN 358, CCLK 29,090,200, SCLK 358, CCLK without ratio
+  29,089,842, no ratio alignments. Packets 29,090,200; IDLE entries 89,468,
+  all earlier ones woken by existing NAND/NFC/DMA completions.
+- **Ratios:** the active `PLL_CTL` was never programmed before this point, so
+  the CCLK:CLKIN ratio was unknown for almost the whole boot. The only known
+  interval was 358 CCLK at 1:1 during the early same-value-VR bypass. The
+  pending relock targets CCLK 16:1 and SCLK 16:5.
+
+Consequence: in guest-clock mode the firmware does **not** reach the later
+`0x019F18F4` boundary. The first IDLE with a running core timer is the PLL
+relock, whose only deadline is CONFIRMED (512 CLKIN). Under either hypothesis
+the timer would not expire during that interval (396,934 decrements remain
+versus at most 512 CCLK at 1:1). However, hypothesis A leaves `TCOUNT` lower by
+up to 512 and B leaves it unchanged, so taking the deadline still requires
+choosing. The rule stops instead of choosing. Default mode passes this IDLE
+because the legacy core timer is not consulted during IDLE.
+
+Open decision for review, not implemented: whether a held domain may cross
+an eligible deadline when no held-domain event can occur in the interval
+under either hypothesis, and what state the held device carries afterwards.

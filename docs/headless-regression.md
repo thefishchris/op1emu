@@ -61,5 +61,8 @@ does not repeatedly retry the unchanged PC. Architectural IDLE and guest
 exceptions are not by themselves JIT failures.
 
 Host USB/IP and audio sinks are not started in headless mode. Guest devices,
-PPI/DMA, existing clocks, and IRQ routing are unchanged. There is no new guest
-clock, TimeSource, scheduler behavior, or automatic power-manager flag clear.
+PPI/DMA, existing clocks, and IRQ routing are unchanged. There is no automatic
+power-manager flag clear. The experimental guest clock is opt-in through
+`OP1EMU_EXPERIMENTAL_GUEST_CLOCK=1` (see `docs/guest-clock-architecture.md`).
+In that mode `--stop-on-unsupported-idle` also stops at a classified
+`held-domain-active` IDLE.
