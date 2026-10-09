@@ -1,6 +1,7 @@
 #include "core.h"
 #include "cpu/cpu.h"
 #include "cpu/nand.h"
+#include "cpu/sic.h"
 #include "peripheral/MT29F4G08.h"
 #include "cec.h"
 #include "evt.h"
@@ -512,6 +513,7 @@ void NandPageReadDmaIdleWake() {
 }
 
 #include "nand_random_read_cases.h"
+#include "mdma_2d_cases.h"
 
 void MdmaIdleWake() {
     BlackFinCpu cpu;
@@ -589,6 +591,7 @@ int main() {
     NandPageReadIdleWake();
     NandPageReadDmaIdleWake();
     NandRandomReadAvailability();
+    Finite2DMdmaCompletion();
     MdmaIdleWake();
     CpuExposure();
     std::puts("execution accounting: all runtime packet-entry cases passed");

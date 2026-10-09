@@ -2,6 +2,13 @@
 
 ## Result
 
+**Latest continuation:** the narrow observed 2D MDMA0 extension now clears the
+following `018D4736` boundary by completing before its pre-IDLE DONE poll.
+A fresh clone of the same frozen inputs displays the normal tape UI. The CPU
+then stops at `019F18F4`, with the byte at `FF907DF6` still 1; its producer/wake
+condition is **UNKNOWN**. See the finite 2D MDMA section of
+`pll-idle-awake-bypass-checkpoint.md`. No further device/timing work followed.
+
 **Current fix:** completed NAND Random Data Read availability is now modeled
 and regressed. Fresh frozen-image trials transfer correct OOB ECC, preserve
 entry 113 as `0072`, and advance `113 -> 114`. The walker returns normally;

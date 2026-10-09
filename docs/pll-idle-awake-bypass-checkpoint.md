@@ -1,5 +1,13 @@
 # Checkpoint: NFC PIO and finite MDMA boundaries completed
 
+**Current 2D MDMA checkpoint:** the observed repeated-four-halfword / 512-byte-pitch
+MDMA0 copy now completes as a finite device operation. Its pre-IDLE DONE poll
+succeeds, so `018D4736` is avoided; no ineligible wake was invented. A fresh
+frozen-input run displays the **normal tape UI** (reels, track 1, `0:00:00`).
+The CPU stopped at the first subsequent unsupported IDLE, `019F18F4`, waiting
+for a byte flag at `FF907DF6` to clear. No continuation or SPORT work followed.
+Exact geometry, evidence, implementation scope, and validation are below.
+
 **Current fix checkpoint:** NAND Random Data Read now retains valid loaded-cache
 availability after `05/two-column/E0`. Nine focused tests pass. Frozen-input v241
 trials transfer correct OOB ECC `E7 03 18 04`, preserve FAT entry 113 as `0072`,
@@ -306,8 +314,10 @@ current input hash, rather than a finite path to the tape UI.
 Immutable provenance and reproducibility are established in the linked follow-up.
 The origin of table index 113's `0x8072` value is now diagnosed in the linked
 construction follow-up, and the narrow Random Data Read fix is verified in the
-current checkpoint. Next, reconstruct the exact two-dimensional MDMA0 operation
-and wake eligibility at `018D4736` before proposing any further model change.
+previous checkpoint. The exact observed two-dimensional MDMA0 operation is now
+documented and supported below, and tape UI has appeared. Next, if requested,
+identify the producer/wake condition of the byte flag at `FF907DF6` at the
+new `019F18F4` boundary before proposing another change.
 Do not classify the
 software cycle as a hardware wait, optimize guest code, fabricate
 a table terminator, connect SPORT, alter CoreTimer or guest `CYCLES`, or redesign
@@ -344,3 +354,174 @@ OP1EMU_EXPERIMENTAL_CLKIN_HZ=25000000 OP1EMU_SHADOW_TIMING=1 OP1EMU_TRACE_CLOCK=
 - Docs: `docs/bf524-pll-idle-foundation.md`, `docs/op1-clock-readiness.md`, this file.
 - Local PDFs/text under `/tmp/opencode/`; hashes in the readiness doc.
 - Unrelated dirty work and `src/cpu/timing_probe.h`.
+
+## Finite 2D MDMA0 reconstruction and completion
+
+Recovery baseline: parent `4d40b7d`, Bcore `37de8e8`; remote HEAD was verified
+equal to the parent before changes. The existing unrelated dirty host/device
+work remains outside this checkpoint. Read-only reconstruction trial:
+`/tmp/opencode/mdma2d-reconstruct-v241.*`, with code disassembly captured from
+live loaded memory and complete MDMA register readbacks.
+
+### Exact captured registers
+
+| Field | MDMA0 source (channel 13, base `FFC00F40`) | MDMA0 destination (channel 12, base `FFC00F00`) |
+| --- | --- | --- |
+| START_ADDR | `FF800994` | `03000000` |
+| CONFIG | `0015` | `0097` |
+| X_COUNT | `0004` (4) | `00C6` (198) |
+| X_MODIFY | `0002` (+2) | `0002` (+2) |
+| Y_COUNT | `09AB` (2475) | `0032` (50) |
+| Y_MODIFY | `FFFA` (-6) | `0076` (+118) |
+| CURR_ADDR at pre-fix IDLE | `FF800994` | `03000000` |
+| CURR_X_COUNT at pre-fix IDLE | `0004` | `00C6` |
+| CURR_Y_COUNT at pre-fix IDLE | `07AB` (1963) | `0032` |
+| NEXT_DESC_PTR / CURR_DESC_PTR | `0 / 0` | `0 / 0` |
+| IRQ_STATUS at pre-fix IDLE | `0009` (RUN plus an already-latched DONE) | `0008` (RUN, DONE clear) |
+| PERIPHERAL_MAP model readback | `D000` (MDMA0 source role) | `C000` (MDMA0 destination role) |
+
+Both channels have WDSIZE=1 (16-bit), DMA2D=1, SYNC=0, FLOW=0 (stop),
+NDSIZE=0, DI_SEL=0. Source WNR=0, DI_EN=0; destination WNR=1, DI_EN=1.
+The source has already supplied 512 four-element rows (4096 bytes) into the
+model's abstract FIFO, leaving 1963 rows; the destination has not consumed them.
+The 4096-byte model FIFO is not a claim about hardware FIFO depth/timing.
+
+**CONFIRMED geometry:** source row width is four halfwords/eight bytes and
+source row-start delta is `(4-1)*2-6 = 0`, so it repeatedly reads
+`FF800994..FF80099B`. There are 2475 source rows. Destination row width is
+198 halfwords/396 bytes, with 50 rows and row-start delta
+`(198-1)*2+118 = 512` bytes. Destination addresses are
+`03000000 + row*512 + column*2` for row 0..49, column 0..197.
+The copied address span is `03000000..0300638B`, with 116-byte gaps between
+rows; **19,800 bytes / 9,900 elements** are transferred, not the full span.
+The source/destination row shapes differ, but total counts match:
+`4*2475 = 198*50 = 9900`.
+
+### Firmware instructions
+
+- `018D461A/018D462E`: destination X_COUNT/X_MODIFY.
+- `018D465A/018D4672`: destination Y_COUNT/Y_MODIFY.
+- `018D4686`: disabled destination CONFIG=`0096`.
+- `018D469E`: source START_ADDR=`FF800994`.
+- `018D46B6/018D46C0`: source X_COUNT/X_MODIFY.
+- `018D46D8/018D46EA`: source Y_COUNT/Y_MODIFY.
+- `018D46F8`: disabled source CONFIG=`0014`.
+- `018D471E`: destination START_ADDR, initially `03000000`.
+- `018D4724`: source CONFIG=`0015`; `018D472A`: destination CONFIG=`0097`.
+- `018D472C..018D4730`: pre-IDLE poll of destination IRQ_STATUS at
+  `FFC00F28`, branch to `018D4740` when bit 0 (DONE) is set.
+- `018D4736`: IDLE if the poll failed; `018D4738..018D473C`: post-wake DONE
+  poll, loop back while clear.
+- `018D4740`: W1C acknowledgement, writing R7=1 to destination IRQ_STATUS.
+- `018D474C..018D4750`: compute the next destination chunk and advance R4.
+
+### Authoritative hardware semantics and decision
+
+Analog Devices **ADSP-BF52x Hardware Reference, Rev. 1.0, March 2010**,
+local `bf52x-hrm-1.0.pdf/.txt`, chapters 5/6, is the reference actually inspected.
+The earlier local file named `adsp-bf52x_hwr_rev1.2.pdf` is an HTML download-error
+artifact and was not used as evidence.
+
+**CONFIRMED** from pp.6-7..6-8, 6-11..6-13, 6-73..6-81, and table 5-1:
+
+- MDMA requires both channels enabled, with equal element width and total
+  transfer count. Row shapes may differ. Source CONFIG is written before
+  destination CONFIG; the source fills a shared FIFO and destination drains it.
+- Ordinary MDMA transfers continuously once enabled; an externally triggered
+  HMDMA mode is a separate feature, not the operation reconstructed here.
+- X_COUNT is elements per row; Y_COUNT is rows. Modifies are signed byte deltas.
+- X_MODIFY advances within a row. At a nonfinal row's last element, **Y_MODIFY
+  replaces X_MODIFY**, applied relative to that last element's address.
+- At the final work-unit element, X_MODIFY is applied, not Y_MODIFY.
+- Final visible registers are **CURR_X_COUNT=0, CURR_Y_COUNT=1**, with
+  CURR_ADDR=last-element address+X_MODIFY. Source final address is `FF80099C`;
+  destination final address is `0300638C`.
+- Stop mode executes one work unit; NDSIZE must be zero. With DI_SEL=0 and
+  DI_EN=1, destination interruption occurs after the complete array, not each row.
+- DMA_DONE follows the last memory access and is W1C. MDMA0 maps to SIC source
+  **42**, ISR1/IWR1 bit 10; MDMA1 maps to 43 (not added to this 2D extension).
+- X_COUNT=0 means 65,536 elements. Neither observed X nor Y count is zero.
+
+**UNKNOWN/out of this scope:** a zero-Y-count work unit, pin/arbitration details,
+cycle-accurate bandwidth/latency, and externally handshaked operation. The new
+2D predicate rejects zero X/Y counts; the established 1D zero-X=65,536 path
+remains unchanged and passes its regression. No zero-Y assumption is introduced.
+
+**Decision A:** the observed memory accesses, count termination, final addresses,
+and DONE event require no additional external condition. They can be completed
+at a deterministic functional device-operation boundary. This is not evidence
+of zero silicon latency or a newly implemented timing model.
+
+Crucially, captured SIC_IWR1=`00010000` has **MDMA0 bit 10 clear**. Simply
+finishing at IDLE cannot legitimately wake the CPU via source 42. The supported
+finite operation therefore completes on MDMA0 CONFIG enable once both channels
+are ready, before the driver's pre-IDLE poll. **ASSUMED abstraction:** the
+atomic configuration-operation boundary represents functional completion without
+modeling elapsed hardware time. All bytes move through the existing FIFO/data
+path; no DONE bit is fabricated without the actual memory transfers.
+
+### Implementation and regression scope
+
+`src/cpu/dma.cpp/.h` add only the aligned repeated-four-contiguous-halfword,
+512-byte-destination-pitch MDMA0 shape: two-dimensional, 16-bit, nonzero counts,
+equal total counts, stop mode, no descriptors, no SYNC, no row interrupts,
+source DI_EN=0 and destination DI_EN=1. Only MDMA0 source/destination CONFIG
+writes invoke the new device-operation service; the existing IDLE service can
+also recognize this shape. Other shapes remain outside the completion predicate.
+
+The existing X/Y address advance already performed `-X_MODIFY+Y_MODIFY` at
+nonfinal row ends. Finite 16-bit MDMA stop state now preserves the documented
+final Y count of 1, and completion IRQ selection uses work-unit completion.
+Peripheral and descriptor paths retain their previous behavior. The existing
+1D MDMA implementation, SPORT, timers, guest CYCLES, scheduler, and abstract
+FIFO capacity were not changed.
+
+`tests/mdma_2d_cases.h`, called by `execution_accounting_tests.cpp`, covers the
+exact 4*2475 to 198*50 geometry, alternating FIFO phase across destination rows,
+source-only FIFO-prefilled operation, source/destination address progression,
+untouched gaps/guards, final addresses/counts, preserved programmed counts,
+one DONE/SIC assertion, W1C, no repeated copy, and rejecting mismatched totals
+and zero-Y shapes. The existing 1D zero-count test still passes. Tests use the
+production memory/DMA/SIC interfaces, synchronously, without host waits or
+firmware PC/address special cases.
+
+All nine focused project tests passed. An exact selectively staged snapshot
+was independently built under `/tmp/opencode/mdma2d-stage`; its emulator library,
+`execution_accounting_tests`, and `pll_idle_tests` passed. The other seven local
+focused tests belong to the preserved dirty setup, not clean snapshot targets.
+
+### Controlled result and stop
+
+Fresh trial `/tmp/opencode/mdma2d-fixed-v241.*` used unchanged frozen NAND
+`c94057cb8000aa9516242c426eeb5c69df03300fd9c4e0f19893c6ef374d5a42` and OTP
+`06c993496c3aba43ca345c62a2caa27b69d68e160cad8c29196152991a238c5a`.
+Read-only probe executable hash:
+`288ceaa9d44d8950e71d33a02fa1c2b5e9b7a2911c3c9790f6c9eaea389919cb`.
+
+**CONFIRMED:** after the enable block, PC is `018D4740`, destination DONE=1,
+CURR_ADDR=`0300638C`, X/Y=`0/1`; source CURR_ADDR=`FF80099C`, X/Y=`0/1`.
+The pre-IDLE DONE poll succeeds; W1C at `018D4740` leaves destination status=0.
+No entry/wake at `018D4736` is required. SIC42 assertion/deassertion and disabled
+wake behavior are covered by the deterministic production-interface regression;
+no SIC_IWR override was added. Subsequent same-shape work units also complete.
+
+**CONFIRMED tape UI:** `mdma2d-fixed-v241-0334.png` displays normal reels,
+track 1, and `0:00:00`, rather than R.00241 splash. Before capture, the CPU was
+stopped immediately at the first subsequent unsupported IDLE:
+
+- IDLE `019F18F4`, resume `019F18F6`, packets **1,402,209,588**.
+- RETS=`FFA0BF74`, RETI=`01A340FE`, current IVG15.
+- Preceding code reads byte `[P5]`, P5=`FF907DF6`, sees value 1, and executes
+  IDLE; it would proceed when that byte becomes zero.
+- SIC mask=`10104000/00100300`, ISR=`0/3`, IWR=`00014000/00010000`;
+  CEC IMASK/IPEND/ILAT=`7FDF/8000/0`.
+- The producer/eligible wake condition for this flag is **UNKNOWN**. It was
+  not investigated or bypassed after tape UI appeared.
+
+Host metadata: CPU stop at **329.025528 seconds**; process lifetime including
+screenshot/shutdown **334.747 seconds**. Packet count is observational, not
+deterministic timing. No execution continued through the new IDLE boundary.
+The private trial NAND ended at
+`ad80c61c602421d46c13e772c8e6cb18ef630c9d92bb977a104056233569475f`;
+OTP and preserved base inputs remained unchanged. No private image, executable,
+log, or screenshot is staged. No push is authorized/performed by this step.

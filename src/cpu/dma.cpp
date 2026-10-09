@@ -18,6 +18,8 @@ public:
     bool IsMDMA() const;
     bool IsMDMASource() const;
     bool IsIdleNFCRead() const;
+    bool IsFinite2DMDMA() const;
+    bool IsFinite2DMDMADestinationFor(const DMAChannel& source) const;
     bool IsIdleMDMADestinationFor(const DMAChannel& source) const;
     bool IsCompleted() const { return completed; }
     DMAPeripheralType GetPeripheralType() const { return peripheralType; }
@@ -187,6 +189,7 @@ bool DMAChannel::IsIdleNFCRead() const {
 }
 
 bool DMAChannel::IsIdleMDMADestinationFor(const DMAChannel& source) const {
+    if (IsFinite2DMDMADestinationFor(source)) return true;
     const bool sourceReady =
         (source.running && source.xCount == xCount) ||
         (source.completed && !source.running && source.currXCount == 0 && source.xCount == xCount);
@@ -197,6 +200,25 @@ bool DMAChannel::IsIdleMDMADestinationFor(const DMAChannel& source) const {
            !source.mode2D && !source.synchronized && source.descriptorSize == 0 &&
            source.next == DMANextOperation::Stop && source.wordSize == wordSize &&
            static_cast<int>(source.peripheralType) == static_cast<int>(peripheralType) + 1;
+}
+
+bool DMAChannel::IsFinite2DMDMA() const {
+    return IsMDMA() && mode2D && wordSize == 1 && !synchronized &&
+           !mode2DInterruptEachRow && descriptorSize == 0 && next == DMANextOperation::Stop &&
+           xCount >= 2 && yCount != 0 && !error;
+}
+
+bool DMAChannel::IsFinite2DMDMADestinationFor(const DMAChannel& source) const {
+    const bool sourceReady = source.running ||
+        (source.completed && source.currXCount == 0);
+    // Observed MDMA0 shape: repeat four contiguous halfwords into 512-byte-pitch rows.
+    return enabled && running && memoryWrite && dataInterruptEnabled && IsFinite2DMDMA() &&
+           peripheralType == DMAPeripheralMDMADest0 && xModify == 2 &&
+           (static_cast<int32_t>(xCount) - 1) * xModify + yModify == 512 &&
+           source.enabled && sourceReady && !source.memoryWrite && !source.dataInterruptEnabled &&
+           source.IsFinite2DMDMA() && source.peripheralType == DMAPeripheralMDMASrc0 &&
+           source.xCount == 4 && source.xModify == 2 && source.yModify == -6 &&
+           static_cast<u32>(xCount) * yCount == static_cast<u32>(source.xCount) * source.yCount;
 }
 
 // Returns the number of bytes transferred in this call (0 if the channel is
@@ -255,17 +277,21 @@ u32 DMAChannel::ProcessTransfer() {
     if (currXCount == 0) {
         bool transferComplete = true;
         if (mode2D) {
-            currYCount--;
-            if (currYCount > 0) {
-                currXCount = xCount ? xCount : 65536;
-                currAddr = currAddr - xModify + yModify;
-                transferComplete = false;
+            // BF52x 2D completion leaves CURR_Y_COUNT=1, not zero. Keep the
+            // legacy peripheral/descriptor paths outside this finite MDMA scope.
+            if (!IsFinite2DMDMA() || currYCount > 1) {
+                currYCount--;
+                if (currYCount > 0) {
+                    currXCount = xCount ? xCount : 65536;
+                    currAddr = currAddr - xModify + yModify;
+                    transferComplete = false;
+                }
             }
         }
         if (dataInterruptEnabled) {
             if (!mode2D || mode2DInterruptEachRow) {
                 TriggerInterrupt(1);
-            } else if (currYCount == 0) {
+            } else if (transferComplete) {
                 TriggerInterrupt(1);
             }
         }
@@ -325,6 +351,8 @@ void DMA::Write32(u32 offset, u32 value) {
     size_t channelIndex = offset / 0x40;
     if (channelIndex < channels.size()) {
         channels[channelIndex]->Write32(offset % 0x40, value);
+        if ((channelIndex == 12 || channelIndex == 13) && offset % 0x40 == 0x08)
+            ServiceFinite2DMDMACompletion();
     }
 }
 
@@ -379,6 +407,12 @@ bool DMA::ServiceIdleMDMACompletion() {
         return destination->IsCompleted();
     }
     return false;
+}
+
+bool DMA::ServiceFinite2DMDMACompletion() {
+    if (!channels[12]->IsFinite2DMDMADestinationFor(*channels[13])) return false;
+    // A functional device-operation boundary, not a bandwidth or latency model.
+    return ServiceIdleMDMACompletion();
 }
 
 void DMA::BindInterrupt(int channel, int q, InterruptHandler callback) {

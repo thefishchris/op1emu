@@ -91,6 +91,7 @@ public:
     void ProcessWithInterrupt(int ivg) override;
 
 protected:
+    bool ServiceFinite2DMDMACompletion();
     Emulator& emulator;
     std::array<std::shared_ptr<DMAChannel>, 16> channels;
     std::map<DMAPeripheralType, std::shared_ptr<DMABus>> dmaBuses;
