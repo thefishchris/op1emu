@@ -9,6 +9,7 @@
 #include "guest_clock.h"
 #include "guest_coretimer.h"
 #include "timing_profile.h"
+#include <algorithm>
 #include "otp.h"
 #include "gptimer.h"
 #include "dma.h"
@@ -458,11 +459,14 @@ HaltReason BlackFinCpu::Run() {
         guestCoreTimer_->Sync();
     }
     if (cpuState_->idle) {
-        LogInfo("idle-enter pc=%08X resume=%08X packets=%llu entries=%llu host-us=%lld",
-                cpuState_->idle_pc, cpuState_->pc,
-                static_cast<unsigned long long>(cpuState_->packet_entries),
-                static_cast<unsigned long long>(cpuState_->idle_entries),
-                static_cast<long long>(microSecondsElapsed));
+        // Functional IDLE recurs at timer rate: collapse the log (first 64, then powers of two).
+        const uint64_t entries = cpuState_->idle_entries;
+        if (!timing_.coreTimerRunsInIdle || entries <= 64 || (entries & (entries - 1)) == 0)
+            LogInfo("idle-enter pc=%08X resume=%08X packets=%llu entries=%llu host-us=%lld",
+                    cpuState_->idle_pc, cpuState_->pc,
+                    static_cast<unsigned long long>(cpuState_->packet_entries),
+                    static_cast<unsigned long long>(entries),
+                    static_cast<long long>(microSecondsElapsed));
         pll_->EnterIdle();
         ServiceIdle();
         return HaltReason::Break;
@@ -547,27 +551,38 @@ void BlackFinCpu::ServiceIdle() {
     nfc->ServiceIdleCompletion();
     if (nfc->PageReadDMAReady()) dma->ServiceIdleNFCReadCompletion();
     dma->ServiceIdleMDMACompletion();
+    FunctionalIdleStep step = FunctionalIdleStep::None;
     if (!pll_->WakeAsserted() && !sic->WakePending()) {
-        // Guest clock: time must not pass across a running device whose clock
-        // domain has UNKNOWN plain-IDLE behavior (architecture D4/D6).
-        if (guestClockMode_ && guestCoreTimer_->Counting()) {
-            ReportHeldDomainIdle();
-            return;
-        }
-        if (const auto deadline = pll_->NextDeadlineTicks()) {
-            if (guestClockMode_) {
-                // The existing CONFIRMED CLKIN-domain lock countdown (E5); CCLK is held.
-                guestClock_.SetRatios(pll_->Ratios());
-                guestClock_.AdvanceIdleClkin(*deadline);
+        if (timing_.coreTimerRunsInIdle) {
+            // Functional profile only: deadline arbitration with the ASSUMED
+            // plain-IDLE core timer (docs/emulator-profiles.md).
+            step = AdvanceFunctionalIdle();
+            if (step == FunctionalIdleStep::Stopped) return;
+        } else {
+            // Guest clock: time must not pass across a running device whose clock
+            // domain has UNKNOWN plain-IDLE behavior (architecture D4/D6).
+            if (guestClockMode_ && guestCoreTimer_->Counting()) {
+                ReportHeldDomainIdle();
+                return;
             }
-            pll_->AdvanceClkin(*deadline);
-            LogInfo("pll-deadline elapsed-clkin=%llu total-clkin=%llu ctl=%04X active=%04X div=%04X stat=%04X provisional-cclk=%llu provisional-sclk=%llu",
-                    static_cast<unsigned long long>(*deadline), static_cast<unsigned long long>(pll_->ClkinTicks()),
-                    pll_->Read32(0), pll_->ActiveCtl().value_or(0), pll_->Divider(), pll_->Status(),
-                    static_cast<unsigned long long>(pll_->CoreHz().value_or(0)),
-                    static_cast<unsigned long long>(pll_->SystemHz().value_or(0)));
+            if (const auto deadline = pll_->NextDeadlineTicks()) {
+                if (guestClockMode_) {
+                    // The existing CONFIRMED CLKIN-domain lock countdown (E5); CCLK is held.
+                    guestClock_.SetRatios(pll_->Ratios());
+                    guestClock_.AdvanceIdleClkin(*deadline);
+                }
+                pll_->AdvanceClkin(*deadline);
+                LogInfo("pll-deadline elapsed-clkin=%llu total-clkin=%llu ctl=%04X active=%04X div=%04X stat=%04X provisional-cclk=%llu provisional-sclk=%llu",
+                        static_cast<unsigned long long>(*deadline), static_cast<unsigned long long>(pll_->ClkinTicks()),
+                        pll_->Read32(0), pll_->ActiveCtl().value_or(0), pll_->Divider(), pll_->Status(),
+                        static_cast<unsigned long long>(pll_->CoreHz().value_or(0)),
+                        static_cast<unsigned long long>(pll_->SystemHz().value_or(0)));
+            }
         }
     }
+    // A core event dispatched by the functional step ended IDLE (bcore clears
+    // idle on dispatch); a simultaneous PLL wake is still routed below.
+    const bool coreWoke = step == FunctionalIdleStep::Advanced && !cpuState_->idle;
     if (pll_->WakeAsserted()) sic->SetInterruptLevel(0, 1); // DPMC SIC source 0.
     if (sic->WakePending()) {
         cpuState_->idle = false;
@@ -583,8 +598,61 @@ void BlackFinCpu::ServiceIdle() {
         sic->SetInterruptLevel(0, 0);
         return;
     }
+    if (coreWoke) {
+        if (functionalIdleWakes_++ < 32 || (functionalIdleWakes_ & (functionalIdleWakes_ - 1)) == 0)
+            LogInfo("idle-wake core-event ivg=6 pc=%08X reti=%08X packets=%llu clkin=%llu cclk=%llu wakes=%llu",
+                    cpuState_->pc, cpuState_->reti, static_cast<unsigned long long>(cpuState_->packet_entries),
+                    static_cast<unsigned long long>(guestClock_.ClkinTicks()),
+                    static_cast<unsigned long long>(guestClock_.CclkCycles()),
+                    static_cast<unsigned long long>(functionalIdleWakes_));
+        return;
+    }
+    // Guest time advanced to a deadline that did not wake the core (for
+    // example a masked IVG6): stay idle; the next Run() takes the next deadline.
+    if (step == FunctionalIdleStep::Advanced && !pll_->WakeAsserted()) return;
     ReportUnsupportedIdle(pll_->WakeAsserted() ? "PLL wake disabled in SIC_IWR0" :
                           "no known eligible wake completion or deterministic deadline");
+}
+
+BlackFinCpu::FunctionalIdleStep BlackFinCpu::AdvanceFunctionalIdle() {
+    guestClock_.SetRatios(pll_->Ratios());
+    const auto pllTicks = pll_->NextDeadlineTicks();
+    const auto timerExpiry = guestCoreTimer_->NextExpiryCclk();
+    if (!pllTicks && !timerExpiry) return FunctionalIdleStep::None;
+    if (!guestClock_.Ratios()) {
+        ReportUnsupportedIdle("functional idle deadline needs known clock ratios");
+        return FunctionalIdleStep::Stopped;
+    }
+    // Candidates in exact sub-tick units of the canonical CLKIN timeline:
+    // the PLL lock (CLKIN domain, CONFIRMED to run in IDLE, wakes via DPMC)
+    // and the core timer expiry (CCLK-core domain, ASSUMED running in plain
+    // IDLE for this profile, wakes via direct CEC IVG6).
+    const uint64_t pllUnits = pllTicks ? guestClock_.UnitsToClkinEdges(*pllTicks) : UINT64_MAX;
+    const uint64_t timerUnits = timerExpiry ? guestClock_.UnitsToCclk(*timerExpiry) : UINT64_MAX;
+    const uint64_t units = std::min(pllUnits, timerUnits);
+    const u32 tcountBefore = guestCoreTimer_->CurrentCount();
+    const uint64_t clkinBefore = guestClock_.ClkinTicks();
+    guestClock_.AdvanceIdleUnits(units, true);
+    pll_->AdvanceClkin(guestClock_.ClkinTicks() - clkinBefore);
+    // Simultaneous deadlines are both serviced here before any wake decision.
+    const uint64_t expiries = guestCoreTimer_->Sync();
+    guestClock_.SetRatios(pll_->Ratios());
+    const char* source = pllUnits == timerUnits ? "pll+coretimer" : (units == pllUnits ? "pll" : "coretimer");
+    if (units == pllUnits || functionalIdleAdvances_ < 32 || (functionalIdleAdvances_ & (functionalIdleAdvances_ - 1)) == 0) {
+        const auto& ratios = guestClock_.Ratios();
+        LogInfo("functional-idle-advance source=%s idle-pc=%08X units=%llu clkin=%llu cclk=%llu tcount=%08X->%08X expiries=%llu "
+                "pll-remaining=%llu ratios=%u/%u/%u packets=%llu advances=%llu (ASSUMED plain-IDLE core timer)",
+                source, cpuState_->idle_pc, static_cast<unsigned long long>(units),
+                static_cast<unsigned long long>(guestClock_.ClkinTicks()), static_cast<unsigned long long>(guestClock_.CclkCycles()),
+                tcountBefore, guestCoreTimer_->CurrentCount(), static_cast<unsigned long long>(expiries),
+                static_cast<unsigned long long>(pll_->NextDeadlineTicks().value_or(0)),
+                ratios ? ratios->unitsPerClkin : 0u, ratios ? ratios->cclkUnits : 0u, ratios ? ratios->sclkUnits : 0u,
+                static_cast<unsigned long long>(cpuState_->packet_entries),
+                static_cast<unsigned long long>(functionalIdleAdvances_ + 1));
+    }
+    ++functionalIdleAdvances_;
+    if (expiries) cec_check_pending(cpuState_.get()); // IVG6 latched by Sync(); dispatch ends IDLE if eligible.
+    return FunctionalIdleStep::Advanced;
 }
 
 void BlackFinCpu::ReportHeldDomainIdle() {

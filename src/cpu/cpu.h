@@ -105,6 +105,10 @@ protected:
     void ServiceIdle();
     void ReportUnsupportedIdle(const char* reason);
     void ReportHeldDomainIdle();
+    enum class FunctionalIdleStep { None, Advanced, Stopped };
+    // Functional profile only: advance architectural IDLE to the earliest
+    // modelled deadline (PLL lock, core timer expiry). One step per call.
+    FunctionalIdleStep AdvanceFunctionalIdle();
 
     // Declared before the devices, which may keep a reference to it.
     GuestClock guestClock_;
@@ -119,6 +123,8 @@ protected:
     std::shared_ptr<BF524PLL> pll_;
     bool unsupportedIdle_ = false;
     const char* unsupportedIdleReason_ = nullptr;
+    uint64_t functionalIdleAdvances_ = 0;
+    uint64_t functionalIdleWakes_ = 0;
     std::atomic<bool> failed_{false};
     bool awakePLLExperiment_ = false;
     AwakePLLStats awakePLLStats_;

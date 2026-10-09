@@ -59,27 +59,34 @@ void StrictRejectsProvisionalAssumptions() {
           "strict rejects the awake-bypass experiment");
     const auto allowed = Resolve({{"OP1EMU_PROFILE", "strict"}, {"OP1EMU_EXPERIMENTAL_PLL_AWAKE_BYPASS", "0"},
                                   {"OP1EMU_SHADOW_TIMING", "1"}, {"OP1EMU_EXPERIMENTAL_GUEST_CLOCK", "1"}});
-    Check(allowed.shadowTiming && allowed.guestClock && !allowed.awakeBypass && allowed.assumptions.size() == 1,
-          "strict keeps observational shadow timing and the opt-in guest clock");
+    Check(allowed.shadowTiming && allowed.guestClock && !allowed.awakeBypass && !allowed.coreTimerRunsInIdle &&
+          allowed.assumptions.size() == 1, "strict keeps shadow timing and the opt-in guest clock, never the plain-IDLE core timer");
 }
 
 void FunctionalEnablesKnownGoodBootAssumptions() {
     const auto functional = Resolve({{"OP1EMU_PROFILE", "functional"}});
     Check(functional.profile == EmulatorProfile::Functional && functional.clkinHz == 25000000 &&
-          functional.shadowTiming && functional.awakeBypass && !functional.guestClock &&
+          functional.shadowTiming && functional.awakeBypass && functional.guestClock &&
+          functional.coreTimerRunsInIdle && functional.guestClockSource == SettingSource::Profile &&
           functional.clkinSource == SettingSource::Profile && functional.shadowSource == SettingSource::Profile &&
-          functional.awakeBypassSource == SettingSource::Profile && functional.assumptions.size() == 3,
-          "functional enables provisional CLKIN, shadow timing and the awake bypass, and lists all three");
+          functional.awakeBypassSource == SettingSource::Profile && functional.assumptions.size() == 5,
+          "functional enables CLKIN, shadow timing, the awake bypass, the guest clock and the plain-IDLE core timer, and lists all five");
+    Check(functional.assumptions.back().rfind("ASSUMED: CoreTimer continues during plain IDLE for functional profile", 0) == 0,
+          "the plain-IDLE core timer assumption is labelled ASSUMED");
+    const auto noGuest = Resolve({{"OP1EMU_PROFILE", "functional"}, {"OP1EMU_EXPERIMENTAL_GUEST_CLOCK", "0"}});
+    Check(!noGuest.guestClock && !noGuest.coreTimerRunsInIdle && noGuest.assumptions.size() == 3,
+          "without the guest clock the plain-IDLE core timer assumption is not applied");
     const auto noShadow = Resolve({{"OP1EMU_PROFILE", "functional"}, {"OP1EMU_SHADOW_TIMING", "0"}});
     Check(!noShadow.shadowTiming && noShadow.shadowSource == SettingSource::Environment &&
           noShadow.awakeBypassRequested && !noShadow.awakeBypass, "an explicit variable overrides the profile default");
     const auto noBypass = Resolve({{"OP1EMU_PROFILE", "functional"}, {"OP1EMU_EXPERIMENTAL_PLL_AWAKE_BYPASS", "0"}});
-    Check(noBypass.clkinHz && noBypass.shadowTiming && !noBypass.awakeBypass && noBypass.assumptions.size() == 1,
+    Check(noBypass.clkinHz && noBypass.shadowTiming && !noBypass.awakeBypass && noBypass.assumptions.size() == 3,
           "the bypass can be switched off individually");
     const auto guest = Resolve({{"OP1EMU_PROFILE", "functional"}, {"OP1EMU_EXPERIMENTAL_GUEST_CLOCK", "1"},
                                 {"OP1EMU_GUEST_CLOCK_COST", "shadow-estimate"}});
-    Check(guest.guestClock && guest.costModel == GuestCostModel::ShadowEstimate && guest.assumptions.size() == 4,
-          "guest clock stays opt-in; shadow-estimate satisfied by the profile's shadow timing");
+    Check(guest.guestClock && guest.guestClockSource == SettingSource::Environment &&
+          guest.costModel == GuestCostModel::ShadowEstimate && guest.assumptions.size() == 5,
+          "shadow-estimate satisfied by the profile's shadow timing");
 }
 
 void InvalidValuesRejected() {
@@ -161,7 +168,7 @@ void CpuFunctional() {
     ScopedEnv profile("OP1EMU_PROFILE", "functional");
     BlackFinCpu cpu;
     Check(cpu.Timing().profile == EmulatorProfile::Functional && cpu.ClockState().ProvisionalClkinHz() == 25000000 &&
-          cpu.ShadowTimingStats() && cpu.Timing().awakeBypass && !cpu.GuestClockMode(),
+          cpu.ShadowTimingStats() && cpu.Timing().awakeBypass && cpu.GuestClockMode() && cpu.Timing().coreTimerRunsInIdle,
           "functional configures the CPU with the known-good boot assumptions");
     SameValueVR(cpu);
     Check(!cpu.UnsupportedIdle() && cpu.AwakePLLExperimentStats().consumed > 0,

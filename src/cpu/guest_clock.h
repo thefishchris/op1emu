@@ -51,6 +51,14 @@ public:
     // countdown). CCLK is held: its plain-IDLE behavior is UNKNOWN (D6).
     // SCLK runs when the ratio is known (section 3).
     void AdvanceIdleClkin(uint64_t ticks);
+    // Architectural IDLE by `units` sub-tick units (ratios must be known).
+    // CCLK advances only if `cclkRuns`: the functional profile's ASSUMED
+    // plain-IDLE core clock (docs/emulator-profiles.md); strict never passes it.
+    void AdvanceIdleUnits(uint64_t units, bool cclkRuns);
+    // Sub-tick units from now until the `ticks`-th following CLKIN edge.
+    uint64_t UnitsToClkinEdges(uint64_t ticks) const;
+    // Sub-tick units from now until the CCLK count reaches `cclk`.
+    uint64_t UnitsToCclk(uint64_t cclk) const;
 
     uint64_t ClkinTicks() const { return clkin_; }
     uint64_t CclkCycles() const { return cclk_; }
@@ -73,6 +81,7 @@ private:
     uint64_t cclk_ = 0;
     uint64_t sclk_ = 0;
     uint64_t sclkPhase_ = 0; // Units into the current SCLK period, < sclkUnits.
+    uint64_t cclkPhase_ = 0; // Units into the current CCLK period (idle advance only).
     uint64_t cclkWithoutRatio_ = 0;
     uint64_t alignments_ = 0;
 };

@@ -16,8 +16,10 @@
 //    Observational shadow timing and the opt-in guest clock stay available.
 //  - functional: enables the assumptions the known-good v241 boot already
 //    uses (provisional CLKIN, shadow timing, PLL awake bypass) so one switch
-//    replaces three. An explicitly set individual variable overrides the
-//    profile default for that setting.
+//    replaces three, plus the guest clock with the ASSUMED plain-IDLE core
+//    timer (the CCLK-core domain keeps running in plain architectural IDLE and
+//    the core timer may wake it through IVG6). An explicitly set individual
+//    variable overrides the profile default for that setting.
 enum class EmulatorProfile { Unset, Strict, Functional };
 
 const char* EmulatorProfileName(EmulatorProfile profile);
@@ -41,6 +43,10 @@ struct TimingConfig {
     SettingSource guestClockSource = SettingSource::Default;
     GuestCostModel costModel = GuestCostModel::MinCost;
     SettingSource costSource = SettingSource::Default;
+    // Functional profile with the guest clock only: the CCLK-core domain
+    // (core timer) advances during plain architectural IDLE. ASSUMED, not a
+    // CONFIRMED BF524 behaviour; never set by strict or unset profiles.
+    bool coreTimerRunsInIdle = false;
     // Every enabled timing assumption, with its evidence label. Empty when
     // nothing beyond the evidence-backed model is in effect.
     std::vector<std::string> assumptions;

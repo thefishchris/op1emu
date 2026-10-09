@@ -78,7 +78,11 @@ TimingConfig ResolveTimingConfig(const EnvironmentLookup& environment) {
     if (const auto guest = Flag(environment, "OP1EMU_EXPERIMENTAL_GUEST_CLOCK")) {
         config.guestClock = *guest;
         config.guestClockSource = SettingSource::Environment;
+    } else if (functional) {
+        config.guestClock = true;
+        config.guestClockSource = SettingSource::Profile;
     }
+    config.coreTimerRunsInIdle = functional && config.guestClock;
     if (const char* value = environment("OP1EMU_GUEST_CLOCK_COST")) {
         if (std::strcmp(value, "shadow-estimate") == 0) config.costModel = GuestCostModel::ShadowEstimate;
         else if (std::strcmp(value, "min-cost") != 0)
@@ -98,6 +102,9 @@ TimingConfig ResolveTimingConfig(const EnvironmentLookup& environment) {
     if (config.guestClock)
         config.assumptions.push_back(std::string("guest clock cost model ") + GuestCostModelName(config.costModel) +
                                      ": ASSUMED, not cycle accurate");
+    if (config.coreTimerRunsInIdle)
+        config.assumptions.push_back("ASSUMED: CoreTimer continues during plain IDLE for functional profile "
+                                     "(CCLK-core domain advances; IVG6 may wake); not CONFIRMED BF524 behaviour");
     return config;
 }
 

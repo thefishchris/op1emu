@@ -5,10 +5,12 @@ selected, validated and listed in one place, `src/cpu/timing_profile.cpp`,
 and reported at startup:
 
 ```text
-Emulator profile=functional assumptions=3
+Emulator profile=functional assumptions=5
   timing assumption: CLKIN=25000000 Hz: PROVISIONAL/LIKELY (board-photo inference), not CONFIRMED
   timing assumption: PLL awake bypass: ...: EXPERIMENTAL
   timing assumption: shadow timing: observational issue model, used here as the awake-bypass cycle source
+  timing assumption: guest clock cost model min-cost: ASSUMED, not cycle accurate
+  timing assumption: ASSUMED: CoreTimer continues during plain IDLE for functional profile (...); not CONFIRMED BF524 behaviour
 ```
 
 | Profile | Purpose | May stop at unresolved hardware behaviour? |
@@ -24,8 +26,9 @@ Neither profile fakes hardware state.
 - **PLL:** registers come from the PLL model in both; nothing is a silent
   zero.
 - **Host time:** neither profile adds host-time guest semantics. The
-  pre-existing core timer ÷10 and SPORT ÷10 slowdowns are profile-independent
-  TEMPORARY HACKs; a profile does not change them.
+  pre-existing SPORT ÷10 slowdown is a profile-independent TEMPORARY HACK.
+  The legacy core timer's ÷10 applies only without the guest clock (strict or
+  unset). Functional uses the guest-clock core timer, which has no slowdown.
 
 ## Selecting a profile
 
@@ -59,7 +62,7 @@ Neither profile fakes hardware state.
 | `OP1EMU_EXPERIMENTAL_CLKIN_HZ` | unset (no CLKIN Hz) | provisional board CLKIN (LIKELY 25 MHz); prerequisite of the awake bypass | **rejected** | set to 25000000 | yes; overrides the profile |
 | `OP1EMU_SHADOW_TIMING` | 0 | observational shadow issue model; cycle source of the awake bypass | allowed (observational) | set to 1 | yes; overrides the profile |
 | `OP1EMU_EXPERIMENTAL_PLL_AWAKE_BYPASS` | 0 | advance the same-value-VR bypass countdown (CCLK=CLKIN) from awake shadow deltas | `=1` **rejected**, `=0` allowed | set to 1 | yes; overrides the profile |
-| `OP1EMU_EXPERIMENTAL_GUEST_CLOCK` | 0 | opt-in guest clock (docs/guest-clock-architecture.md) | allowed, opt-in | not set (opt-in) | yes |
+| `OP1EMU_EXPERIMENTAL_GUEST_CLOCK` | 0 | guest clock and HRM core timer (docs/guest-clock-architecture.md) | allowed, opt-in; a running core timer **holds** plain IDLE | set to 1; enables the plain-IDLE core-timer assumption | yes; `=0` under functional also drops that assumption |
 | `OP1EMU_GUEST_CLOCK_COST` | `min-cost` | guest clock cost model | allowed | not set | yes |
 | `OP1EMU_TRACE_CLOCK` | 0 | MMIO clock-observation trace | allowed | not set | yes |
 
@@ -76,8 +79,8 @@ needed for the v241 boot at its default.
   countdown needs a running CLKIN time source`: the firmware's same-value VR
   write starts a 512-tick bypass countdown that no evidence-backed clock can
   advance while awake. This is identical to the unset default.
-- **functional** enables exactly the assumptions the known-good local boot
-  already used, and no new ones:
+- **functional** enables the assumptions the known-good local boot already
+  used:
   - **CLKIN = 25 MHz:** PROVISIONAL/LIKELY, from a board photo, not
     CONFIRMED.
   - **Shadow timing:** observational issue estimate, used here only as the
@@ -85,9 +88,20 @@ needed for the v241 boot at its default.
   - **PLL awake bypass:** EXPERIMENTAL ideal/no-stall advance of the bypass
     countdown while CCLK = CLKIN, with block-level expiry.
 
-  It does **not** let the core timer advance through IDLE. It therefore still
-  stops at the power-manager IDLE `0x019F18F4` after the tape UI (see
-  `pll-idle-awake-bypass-checkpoint.md` and guest-clock architecture §10).
+  plus, since 2026-10-09, one decided assumption:
+  - **Guest clock** (min-cost, ASSUMED) with the HRM core timer.
+  - **CoreTimer during plain IDLE = ASSUMED RUNNING, for usability.** The
+    CCLK-core domain advances during plain architectural IDLE, and the core
+    timer's IVG6 may wake the core. This is not a CONFIRMED BF524 behaviour:
+    the documentary search found no answer, and the counterfactual shows the
+    choice is guest-observable (guest-clock architecture §10–§11).
+
+  IDLE then advances deterministically to the earliest modelled deadline (PLL
+  lock or core timer expiry), with no packet spinning and no host time. The
+  v241 fixture boots to the tape UI, crosses the boot-ROM PLL IDLE and the
+  power-manager IDLE `0x019F18F4`, and stays interactive.
+- **strict** never applies that assumption: core timer during plain IDLE =
+  UNKNOWN, and a running core timer is a `held-domain-active` stop.
 
 ## Reproducible commands
 

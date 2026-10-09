@@ -525,3 +525,20 @@ The private trial NAND ended at
 `ad80c61c602421d46c13e772c8e6cb18ef630c9d92bb977a104056233569475f`;
 OTP and preserved base inputs remained unchanged. No private image, executable,
 log, or screenshot is staged. No push is authorized/performed by this step.
+
+## Functional-profile crossing of 0x019F18F4 (2026-10-09)
+
+**Strict (unchanged):** core timer during plain IDLE = UNKNOWN. With the guest
+clock, a running core timer is a `held-domain-active` stop. Without it, the
+boundary stays `no known eligible wake completion or deterministic deadline`.
+
+**Functional:** core timer during plain IDLE = ASSUMED RUNNING, for usability
+(`docs/emulator-profiles.md`, guest-clock architecture §11). The policy byte
+`FF907DF6` stays 1: no flag clear, no USB event, no packet spinning. IDLE
+advances the guest clock exactly to the next core-timer expiry, latches
+`TINT`, and dispatches IVG6 to `EVT6=FFA09A88` with `RETI=019F18F6`, with no
+guest packets executed while idle. The first step in a v241 trial advanced
+239,113 CCLK (`TCOUNT` `0x3A609` → reload `0x61A80`) at packet 1,294,447,509.
+The firmware then runs its normal timer-driven idle loop and the tape UI
+stays interactive. This is a usability assumption, not evidence for the BF524
+hardware behaviour.

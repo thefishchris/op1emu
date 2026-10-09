@@ -25,6 +25,18 @@ advancement through the core timer is permitted. What changed:
   plain IDLE stays UNKNOWN.
 - `CYCLES` during IDLE now has explicitly conflicting sources (D6).
 
+Revision 4 (2026-10-09), after review of the first firmware trial. The IDLE
+deadline rule (D4) is refined in section 10 to separate event eligibility
+from state evolution, and a counterfactual check of the boot-ROM PLL IDLE is
+recorded there. Not yet implemented.
+
+Revision 5 (2026-10-09): a profile-scoped decision, implemented (section 11).
+**Strict:** core timer during plain IDLE = UNKNOWN; a running core timer holds
+IDLE (unchanged). **Functional:** core timer during plain IDLE = ASSUMED
+RUNNING, for usability. The global evidence classification (D6, section 3)
+is not changed: this is a documented functional-profile assumption, not a
+BF524 hardware claim.
+
 Related documents:
 
 - `docs/upstream-guest-clock-audit.md`: what upstream PR #13 (`TimeSource`)
@@ -613,3 +625,136 @@ because the legacy core timer is not consulted during IDLE.
 Open decision for review, not implemented: whether a held domain may cross
 an eligible deadline when no held-domain event can occur in the interval
 under either hypothesis, and what state the held device carries afterwards.
+
+## 10. Refined IDLE rule and the PLL-IDLE counterfactual (revision 4)
+
+### 10.1 Rule (decided in review; not yet implemented)
+
+For each candidate eligible deadline, an active device on a domain whose IDLE
+behavior is UNKNOWN is assessed on two separate questions:
+
+1. **Event eligibility:** can the device produce an event (interrupt edge or
+   status change) before the candidate deadline under *any* plausible
+   hypothesis for its domain? This is decided by a bound, for example the
+   remaining count against the maximum domain cycles in the interval.
+2. **State evolution:** does its internal state change over the interval?
+   For an UNKNOWN domain, the answer is unknown by definition.
+
+The device blocks advancement only if (1) is possible, or if its ambiguous
+state from (2) becomes guest-observable before it is deterministically
+overwritten or reinitialized. It does not automatically block an earlier
+CONFIRMED deadline. When ordering is safe but state evolution is unknown, the
+condition is called **`unresolved-domain-state`**, distinct from
+`held-domain-active`. Crossing is permitted only if the ambiguity is shown
+(or, in future, tracked) to be destroyed before any observation. No general
+symbolic-state engine is planned. Neither hypothesis for the CCLK-core domain
+is chosen.
+
+### 10.2 Counterfactual at the boot-ROM PLL IDLE (diagnostic only)
+
+Temporary, uncommitted instrumentation let guest-clock runs cross the PLL
+lock at `EF000C7A`. It applied only when the core timer's remaining count
+exceeded a conservative bound of 512 CLKIN × 64 = 32,768 CCLK, and it traced
+every guest core-timer access and expiry afterwards. Each run used the same
+inputs as section 9; only the hypothesis differed:
+
+| Hypothesis | Core-timer shift across the lock | Post-lock `TCOUNT` |
+| --- | --- | --- |
+| A (counts; modelled 1:1 relock, 512 CCLK) | −512 | `0x60C86` |
+| B (frozen) | 0 | `0x60E86` |
+| A16 (sensitivity: 16:1 during lock, 8,192 CCLK) | −8,192 | `0x5EE86` |
+
+Results (runs A1, A2, B1, B2, A16):
+
+- **Event ordering:** safe. The remaining count, 396,934, far exceeds every
+  bound, and no expiry occurred before the PLL wake in any run.
+- **Guest accesses after the wake:** **none.** From the wake to the next
+  boundary (`0x019F18F4`, about 3,200 expiries later), the firmware never
+  read or wrote `TCNTL`, `TCOUNT`, `TPERIOD` or `TSCALE`. The ambiguity is
+  never overwritten, reinitialized, re-anchored, or read directly.
+- **First divergence:** the first expiry. A is 512 CCLK earlier than B
+  (B: CCLK 29,487,134; A: 29,486,622, detected at 29,486,623 at the block
+  end). Both land at PC `019F190E`. At the second expiry the interrupted PC
+  already differs (A `FFA0803C`, B `FFA08036`, CCLK 29,886,622 versus
+  29,887,134). IVG6 therefore preempts different instructions, a
+  guest-visible difference through RETI and execution interleaving.
+- **Reconvergence:** none. With auto-reload and no rewrite, the 512-CCLK
+  phase offset persists through every recorded expiry (offsets of −511 to
+  −518 reflect block-granular detection).
+- **Attribution:** repeats of the same hypothesis agree exactly (PC and CCLK)
+  for the first 280 expiries, up to about CCLK 141.5M. Divergence from the
+  host-time devices (SPORT, RTC, panel TE, GP timers) starts only after that.
+  The A/B divergence at expiry index 1 (about CCLK 29.9M) is well inside the
+  reproducible region, so it is caused by the hypothesis.
+- **Next boundary:** every run reaches `0x019F18F4` and stops there with
+  `held-domain-active`. No eligible deadline exists at that point, so the
+  refined rule gives the same stop.
+
+**Decision outcome:** A and B produce different guest behavior before any
+reconvergence. This PLL-IDLE crossing is **not** observationally safe, and the
+core timer during plain IDLE remains a real blocker. `unresolved-domain-state`
+crossing is not authorized here, and neither hypothesis is chosen.
+Documentary evidence still does not decide the hardware behavior (section 6).
+
+## 11. Functional-profile IDLE deadlines (revision 5)
+
+### 11.1 Assumption and scope
+
+The functional profile (`docs/emulator-profiles.md`) enables the guest clock
+and **ASSUMES that the CCLK-core domain keeps running during plain
+architectural IDLE**, so the core timer counts and its direct CEC IVG6 request
+may wake the core. The section 10.2 counterfactual shows this choice is
+guest-observable. It is therefore an assumption, labelled `ASSUMED` in the
+startup log, and never applied by `strict` or an unset profile. Sleep and deep
+sleep (`STOPCK`/`PDWN`) are unaffected: they remain explicit unsupported stops
+in the PLL model.
+
+### 11.2 Arbitration (`BlackFinCpu::AdvanceFunctionalIdle`)
+
+Each `ServiceIdle()` call, after the existing finite completions and only
+when no wake is already pending, takes **one** deadline step:
+
+1. Refresh the guest clock's ratios from the PLL. If they are unknown while a
+   candidate exists, stop with `functional idle deadline needs known clock
+   ratios`.
+2. Candidates, in exact sub-tick units of the canonical CLKIN timeline:
+   - **PLL lock:** CLKIN domain (CONFIRMED running in IDLE), wakes via DPMC
+     (SIC source 0, subject to `SIC_IWR`).
+   - **Core timer expiry:** CCLK-core domain (ASSUMED running), wakes via
+     direct IVG6.
+
+   A stopped or disabled timer is not a candidate.
+3. Advance by the earliest candidate only: `GuestClock::AdvanceIdleUnits`,
+   with the CCLK phase tracked exactly, plus the PLL by the CLKIN edges
+   crossed. Then sync the core timer, which latches `TINT` and raises IVG6.
+   Equal deadlines are serviced in the same step before any wake decision.
+4. Run `cec_check_pending`. An eligible IVG6 dispatches through the existing
+   CEC model (bcore ends IDLE, `RETI` = post-IDLE PC). A PLL wake is still
+   routed through the existing SIC path. A deadline that wakes nothing (for
+   example a masked IVG6) leaves the core idle for the next step.
+
+No guest packets execute while idle, no host time is consulted, and there is
+no PC special case.
+
+### 11.3 Firmware results (v241 fixture, snapshot NAND, two runs)
+
+- **Boot-ROM PLL IDLE `EF000C7A`:** the PLL lock is earlier. The step is 512
+  units at 1:1; the core timer advances by the same interval, `TCOUNT`
+  `0x60E86` → `0x60C86`. PLL state commits to ratios 16/1/5, the DPMC wake
+  resumes at `EF000C7C`, and packets stay 29,090,200. This is identical in both
+  runs (and equal to counterfactual hypothesis A).
+- **Power-manager IDLE `019F18F4`:** the policy byte stays 1 (no clear, no USB
+  event). The first step (run f1) entered IDLE at packet 1,294,447,509 and
+  advanced 239,113 CCLK to the exact expiry (`TCOUNT` `0x3A609` → reload
+  `0x61A80`, `TINT` latched). IVG6 dispatched to `EVT6=FFA09A88` with
+  `RETI=019F18F6`, and packets were unchanged through the step. More than
+  65,000 further timer-driven steps followed in each run, with no new
+  unsupported boundary.
+- **Interactive UI:** the tape UI appears at about 4.5 host minutes. `play`
+  runs the transport (counter to 0:00:11) and `stop` holds it (0:00:16, still
+  held 30 s later). There was no hang or assertion over about 11 minutes.
+- **Repeatability:** all 178,937 logged idle events agree through the boot-ROM
+  PLL wake. The runs then diverge during awake execution, before the first
+  `019F18F4` entry (packets 1,294,447,509 versus 1,290,260,068), because SPORT,
+  RTC, panel TE and GP timers still use host time. The idle mechanism itself
+  is host-time free. Full repeatability needs those devices on the guest clock.

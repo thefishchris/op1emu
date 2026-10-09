@@ -34,7 +34,7 @@ with tempfile.TemporaryDirectory(prefix='op1-headless-cli-') as directory:
     assert result.returncode == 0 and 'Emulator profile=strict assumptions=0' in result.stdout+result.stderr, result.stdout+result.stderr
     result = run_env(command + ['--profile', 'functional'])
     output = result.stdout+result.stderr
-    assert result.returncode == 0 and 'Emulator profile=functional assumptions=3' in output and 'CLKIN=25000000 Hz: PROVISIONAL' in output, output
+    assert result.returncode == 0 and 'Emulator profile=functional assumptions=5' in output and 'ASSUMED: CoreTimer continues during plain IDLE' in output and 'CLKIN=25000000 Hz: PROVISIONAL' in output, output
     assert run_env(command + ['--profile', 'lenient']).returncode == 1
     assert run_env(command, OP1EMU_PROFILE='lenient').returncode == 1
     assert run_env(command, OP1EMU_PROFILE='strict', OP1EMU_EXPERIMENTAL_CLKIN_HZ='25000000').returncode == 1

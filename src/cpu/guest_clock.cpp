@@ -31,11 +31,16 @@ void GuestClock::SetRatios(const std::optional<ClockRatios>& ratios) {
             sclkPhase_ = 0;
             ++alignments_;
         }
-    } else if (subunits_ || sclkPhase_) {
+        if (ratios->cclkUnits != ratios_->cclkUnits && cclkPhase_) {
+            cclkPhase_ = 0;
+            ++alignments_;
+        }
+    } else if (subunits_ || sclkPhase_ || cclkPhase_) {
         // Leaving known ratios: the fraction cannot be carried into an unknown base.
         if (subunits_) clkin_ = CheckedAdd(clkin_, 1);
         subunits_ = 0;
         sclkPhase_ = 0;
+        cclkPhase_ = 0;
         ++alignments_;
     }
     ratios_ = ratios;
@@ -74,10 +79,33 @@ void GuestClock::AdvanceIdleClkin(uint64_t ticks) {
     clkin_ = CheckedAdd(clkin_, ticks);
 }
 
+void GuestClock::AdvanceIdleUnits(uint64_t units, bool cclkRuns) {
+    if (!units) return;
+    if (!ratios_) throw std::logic_error("guest clock idle advance needs known ratios");
+    if (cclkRuns) {
+        const uint64_t total = CheckedAdd(cclkPhase_, units);
+        cclk_ = CheckedAdd(cclk_, total / ratios_->cclkUnits);
+        cclkPhase_ = total % ratios_->cclkUnits;
+    }
+    AdvanceUnits(units);
+}
+
+uint64_t GuestClock::UnitsToClkinEdges(uint64_t ticks) const {
+    if (!ratios_) throw std::logic_error("guest clock conversion needs known ratios");
+    if (!ticks) return 0;
+    return CheckedMul(ticks, ratios_->unitsPerClkin) - subunits_;
+}
+
+uint64_t GuestClock::UnitsToCclk(uint64_t cclk) const {
+    if (!ratios_) throw std::logic_error("guest clock conversion needs known ratios");
+    if (cclk <= cclk_) return 0;
+    return CheckedMul(cclk - cclk_, ratios_->cclkUnits) - cclkPhase_;
+}
+
 std::optional<uint64_t> GuestClock::ClkinTickForCclk(uint64_t cclk) const {
     if (!ratios_) return std::nullopt;
     if (cclk <= cclk_) return clkin_;
-    const uint64_t units = CheckedAdd(subunits_, CheckedMul(cclk - cclk_, ratios_->cclkUnits));
+    const uint64_t units = CheckedAdd(subunits_, UnitsToCclk(cclk));
     const uint64_t whole = units / ratios_->unitsPerClkin;
     return CheckedAdd(clkin_, whole + (units % ratios_->unitsPerClkin ? 1 : 0));
 }
