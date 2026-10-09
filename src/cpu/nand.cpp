@@ -1,4 +1,5 @@
 #include "nand.h"
+#include "nand_ecc.h"
 #include <cstring>
 
 NFC::NFC(u32 baseAddr) : RegisterDevice("NFC", baseAddr, 0x50) {
@@ -148,38 +149,6 @@ u32 NFC::DMAWrite(int x, int y, const void* source, u32 length)
         UpdateInterrupts();
     }
     return len;
-}
-
-static std::tuple<u16, u16> ComputeEccPair(const u8* data, u32 length, u32 bytePos) {
-    u8 p1 = 0, p1p = 0, p2 = 0, p2p = 0, p4 = 0, p4p = 0;
-    u8 lp[8] = {0};
-    u8 lpp[8] = {0};
-    for (u32 i = 0; i < length; i++) {
-        u8 d = data[i];
-        u8 byteParity = 0;
-        for (int pos = 0; pos < 8; pos++) {
-            u8 bit = (d >> pos) & 1;
-            if (pos & 0x1) p1 ^= bit;
-            else           p1p ^= bit;
-            if (pos & 0x2) p2 ^= bit;
-            else           p2 ^= bit;
-            if (pos & 0x4) p4 ^= bit;
-            else           p4p ^= bit;
-            byteParity ^= bit;
-        }
-
-        u32 currentBytePos = bytePos + i;
-        for (int pos = 0; pos < 8; pos++) {
-            if (currentBytePos & (1 << pos)) {
-                lp[pos] ^= byteParity;
-            } else {
-                lpp[pos] ^= byteParity;
-            }
-        }
-    }
-    u16 ecc1 = (p1 << 0) | (p2 << 1) | (p4 << 2) | (lp[0] << 3) | (lp[1] << 4) | (lp[2] << 5) | (lp[3] << 6) | (lp[4] << 7) | (lp[5] << 8) | (lp[6] << 9) | (lp[7] << 10);
-    u16 ecc2 = (p1p << 0) | (p2p << 1) | (p4p << 2) | (lpp[0] << 3) | (lpp[1] << 4) | (lpp[2] << 5) | (lpp[3] << 6) | (lpp[4] << 7) | (lpp[5] << 8) | (lpp[6] << 9) | (lpp[7] << 10);
-    return {ecc1 & 0x7FF, ecc2 & 0x7FF};
 }
 
 void NFC::CalculateECC(const u8* data, u32 length) {

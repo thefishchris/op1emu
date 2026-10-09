@@ -110,8 +110,9 @@ directory, which is printed. Private images stay outside Git.
 
 `OP1EMU_NAND` and `OP1EMU_OTP_SOURCE` may replace `--nand` and `--otp`.
 
-**Build dependency (2026-10-09):** booting a genuine v241 dump also needs the
-NFC ECC P2-complement fix (`docs/nand-boot-investigation.md`). At the time of
-writing, that fix exists only in uncommitted local work
-(`src/cpu/nand_ecc.cpp`). A build of committed history alone stops in the
-boot-ROM ECC error loop at `EF00074E` under any profile.
+**Build dependency:** booting a genuine v241 dump needs the NFC ECC
+P2-complement fix (`docs/nand-boot-investigation.md`), which is committed in
+`src/cpu/nand_ecc.cpp` and regressed by `nand_ecc_tests`. Without it, the boot
+ROM takes its ECC error path (IDLE at `EF000748`, `RETS=EF0079EC`) under any
+profile. Committed history now boots the fixture to the tape UI with
+`--profile functional`.
