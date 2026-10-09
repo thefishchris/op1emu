@@ -14,6 +14,10 @@ cmake --build build --target op1emu-headless headless_tests execution_accounting
   --screenshot-on-stop /new/output/tape.ppm
 ```
 
+`--profile strict|functional` selects an execution profile and overrides
+`OP1EMU_PROFILE` (see `docs/emulator-profiles.md`). `run-op1.sh --headless`
+wraps this with private input copies.
+
 The CPU still boots the original OP-1 NAND path. No flags/interrupts are fabricated
 to advance an unsupported boundary. The existing configured OTP input must also
 be supplied through the current local setup. For a clean baseline that selects

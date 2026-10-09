@@ -1,0 +1,117 @@
+# Execution profiles: strict and functional
+
+The emulator has two explicit execution profiles. Timing assumptions are
+selected, validated and listed in one place, `src/cpu/timing_profile.cpp`,
+and reported at startup:
+
+```text
+Emulator profile=functional assumptions=3
+  timing assumption: CLKIN=25000000 Hz: PROVISIONAL/LIKELY (board-photo inference), not CONFIRMED
+  timing assumption: PLL awake bypass: ...: EXPERIMENTAL
+  timing assumption: shadow timing: observational issue model, used here as the awake-bypass cycle source
+```
+
+| Profile | Purpose | May stop at unresolved hardware behaviour? |
+| --- | --- | --- |
+| `strict` | correctness, research, debugging | yes, by design |
+| `functional` | usable progress with explicit, documented assumptions | yes, if no documented assumption covers it |
+| unset | pre-profile behaviour, for compatibility | as before |
+
+Neither profile fakes hardware state.
+
+- **IDLE:** architectural IDLE stays real in both. There is no no-op IDLE and
+  no packet spinning through IDLE.
+- **PLL:** registers come from the PLL model in both; nothing is a silent
+  zero.
+- **Host time:** neither profile adds host-time guest semantics. The
+  pre-existing core timer ÷10 and SPORT ÷10 slowdowns are profile-independent
+  TEMPORARY HACKs; a profile does not change them.
+
+## Selecting a profile
+
+- `OP1EMU_PROFILE=strict|functional` applies to the GUI and headless.
+- `--profile strict|functional` applies to headless only (`op1emu-headless`
+  or `op1emu --headless`).
+- Any other value is rejected at startup.
+- With neither set, the profile is **unset** and behaviour is unchanged: each
+  individual variable below is read exactly as before, and nothing is enabled
+  implicitly.
+
+## Precedence
+
+1. `--profile` (headless) overrides `OP1EMU_PROFILE`.
+2. Under `functional`, an individual variable that is **explicitly set**
+   overrides that one profile default. For example, `OP1EMU_SHADOW_TIMING=0`
+   turns shadow timing off, which also disables the awake bypass because it is
+   a prerequisite. The startup log names the source of each setting
+   (`default`, `profile`, `environment`).
+3. Under `strict`, assumption-bearing variables are **rejected**, not
+   overridden: `OP1EMU_EXPERIMENTAL_CLKIN_HZ` (any value) and
+   `OP1EMU_EXPERIMENTAL_PLL_AWAKE_BYPASS=1` stop startup with an error.
+   Observational and already opt-in strict variables stay allowed.
+4. Value validation is the same in every profile (for example, CLKIN accepts
+   only `25000000`).
+
+## Timing control inventory
+
+| Variable | Default | Purpose | `strict` | `functional` | Externally configurable |
+| --- | --- | --- | --- | --- | --- |
+| `OP1EMU_EXPERIMENTAL_CLKIN_HZ` | unset (no CLKIN Hz) | provisional board CLKIN (LIKELY 25 MHz); prerequisite of the awake bypass | **rejected** | set to 25000000 | yes; overrides the profile |
+| `OP1EMU_SHADOW_TIMING` | 0 | observational shadow issue model; cycle source of the awake bypass | allowed (observational) | set to 1 | yes; overrides the profile |
+| `OP1EMU_EXPERIMENTAL_PLL_AWAKE_BYPASS` | 0 | advance the same-value-VR bypass countdown (CCLK=CLKIN) from awake shadow deltas | `=1` **rejected**, `=0` allowed | set to 1 | yes; overrides the profile |
+| `OP1EMU_EXPERIMENTAL_GUEST_CLOCK` | 0 | opt-in guest clock (docs/guest-clock-architecture.md) | allowed, opt-in | not set (opt-in) | yes |
+| `OP1EMU_GUEST_CLOCK_COST` | `min-cost` | guest clock cost model | allowed | not set | yes |
+| `OP1EMU_TRACE_CLOCK` | 0 | MMIO clock-observation trace | allowed | not set | yes |
+
+Some controls exist only in uncommitted local work at the time of writing:
+`OP1EMU_AUDIO_PACING_DIVISOR` (defaults to the same ÷10), `OP1EMU_OTP_FILE`,
+`OP1EMU_GPIO_MODEL` (defaults to 17), and the `OP1EMU_TRACE_*` and
+`OP1EMU_TIMING_PROBE` diagnostics. The profiles do not set them, and none is
+needed for the v241 boot at its default.
+
+## What each profile assumes
+
+- **strict** enables no timing assumption. On the current v241 fixture it stops
+  explicitly after 1,969 packets at `EF000C3E` with `awake PLL bypass
+  countdown needs a running CLKIN time source`: the firmware's same-value VR
+  write starts a 512-tick bypass countdown that no evidence-backed clock can
+  advance while awake. This is identical to the unset default.
+- **functional** enables exactly the assumptions the known-good local boot
+  already used, and no new ones:
+  - **CLKIN = 25 MHz:** PROVISIONAL/LIKELY, from a board photo, not
+    CONFIRMED.
+  - **Shadow timing:** observational issue estimate, used here only as the
+    cycle source for the awake bypass.
+  - **PLL awake bypass:** EXPERIMENTAL ideal/no-stall advance of the bypass
+    countdown while CCLK = CLKIN, with block-level expiry.
+
+  It does **not** let the core timer advance through IDLE. It therefore still
+  stops at the power-manager IDLE `0x019F18F4` after the tape UI (see
+  `pll-idle-awake-bypass-checkpoint.md` and guest-clock architecture §10).
+
+## Reproducible commands
+
+`run-op1.sh` needs an explicit profile and inputs. It never modifies them: NAND
+opens with `--nand-snapshot`, and the OTP is copied into a fresh private run
+directory, which is printed. Private images stay outside Git.
+
+```sh
+# A. strict research run (headless, stop at the first unsupported boundary)
+./run-op1.sh --headless --profile strict --nand PATH/TO/nand.img --otp PATH/TO/otp.bin \
+    -- --stop-on-unsupported-idle --max-runtime 600000
+
+# B. functional boot to the tape UI (GUI)
+./run-op1.sh --profile functional --nand PATH/TO/nand.img --otp PATH/TO/otp.bin
+
+# B'. the same, headless, with a screenshot at the first unsupported boundary
+./run-op1.sh --headless --profile functional --nand PATH/TO/nand.img --otp PATH/TO/otp.bin \
+    -- --stop-on-unsupported-idle --max-runtime 1200000 --screenshot-on-stop NEW.ppm
+```
+
+`OP1EMU_NAND` and `OP1EMU_OTP_SOURCE` may replace `--nand` and `--otp`.
+
+**Build dependency (2026-10-09):** booting a genuine v241 dump also needs the
+NFC ECC P2-complement fix (`docs/nand-boot-investigation.md`). At the time of
+writing, that fix exists only in uncommitted local work
+(`src/cpu/nand_ecc.cpp`). A build of committed history alone stops in the
+boot-ROM ECC error loop at `EF00074E` under any profile.
