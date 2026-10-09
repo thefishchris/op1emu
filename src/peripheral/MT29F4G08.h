@@ -60,6 +60,7 @@ protected:
     bool resetPending = false;
     bool pageReadPending = false;
     bool pageReadDataReady = false;
+    bool randomReadValid = false;
     u32 pendingReadPage = 0;
     u32 pendingReadColumn = 0;
 };

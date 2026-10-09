@@ -1,5 +1,29 @@
 # Checkpoint: NFC PIO and finite MDMA boundaries completed
 
+**Current fix checkpoint:** NAND Random Data Read now retains valid loaded-cache
+availability after `05/two-column/E0`. Nine focused tests pass. Frozen-input v241
+trials transfer correct OOB ECC `E7 03 18 04`, preserve FAT entry 113 as `0072`,
+advance `113 -> 114`, and return from the chain walker to `0190A306`. The first
+new stop is IDLE **`018D4736`**, polling MDMA0 destination DONE at `FFC00F28`
+with two-dimensional CONFIG `0015/0097`. Tape UI has not yet appeared; no next
+hardware fix is included. Full evidence and exact-device timing qualifications
+are in [NAND provenance and traversal](v241-nand-provenance-and-traversal.md).
+
+**Pre-fix follow-up (2026-10-08):** immutable-input trials disproved the finite
+loaded-code traversal interpretation below. The actual reachable chain is
+`3 -> ... -> 113 -> 0x8072 -> 0 -> 0`; two fresh clones reproduce its first
+self-cycle after 113 lookups. R.00241 remains displayed, with no new unsupported
+IDLE. See [NAND provenance and traversal](v241-nand-provenance-and-traversal.md)
+for full hashes, reconstruction checks, exact function boundaries, and evidence.
+
+**Pre-fix construction diagnosis:** the linked follow-up classifies the original current-image
+cycle as **D — emulator data-path corruption**. `/yaffs2/user/tape_c.raw` contains
+correct FAT16 entry 113 (`72 00`) and matching OOB ECC. Random Data Read `E0`
+incorrectly reports data unavailable and blocks its OOB DMA; guest ECC correction
+at `FFA07CE2` then flips the high byte to `80`. No fix was implemented during diagnosis. Two fresh
+pristine clones stop earlier at a guest database assertion/IDLE before allocating
+the FAT table; a pristine-cycle comparison is not yet established.
+
 The earlier post-PLL `NFC_IRQSTAT.RD_RDY` boundary is now complete with
 evidence-backed programmed-I/O request/consume/ack behavior. That exposed and
 completed a finite MDMA0 fill boundary. A fresh bounded v241 run reaches the
@@ -263,9 +287,9 @@ had executed **3,098,402,121** packet entries, so this is not a halted CPU.
 From approximately 110 seconds, execution is dominated by ordinary loaded code
 at `0x01909F00..0x0190A31C`. A temporary read-only register/stack diagnostic,
 removed after capture, established the call chain
-`0x0190AF00 -> 0x0190A306 -> 0x0190A226`. It walks a 16-bit mapping table at
-`0x01082B98` through the finite chain `3 -> 4 -> 5 -> ... -> 0xFFFF`; the
-observed bound is `0xFFFF`. This explains the high packet count but is not an
+`0x0190AF00 -> 0x0190A306 -> 0x0190A226`. The initial table prefix and observed
+bound `0xFFFF` were interpreted as a finite chain; **that interpretation was
+disproved by the immutable-input follow-up** linked above. It is still not an
 MMIO poll or an unsupported hardware boundary. A 65,535-element MDMA
 counterfactual produced the same table and traversal, so the documented
 65,536th element is not causal.
@@ -274,16 +298,20 @@ The old `boot-content241-ui-check` screenshots reached the tape UI, but they
 are not a valid A/B comparison: current `build/nand-working241.img` was modified
 at 2026-10-07 21:21, after that run, and its per-run NAND clone is no longer
 available. The current trials copied the same current base and reproduced the
-same traversal. Whether this finite software work eventually reaches the tape
-UI with the current NAND state is **UNKNOWN**.
+same traversal. The follow-up establishes a reachable zero self-cycle with the
+current input hash, rather than a finite path to the tape UI.
 
 ## Smallest next task
 
-Establish immutable NAND-image provenance for comparisons, then determine
-whether the finite loaded-code table traversal completes on the current image.
-Do not classify it as a hardware wait, optimize guest code, fabricate a table
-terminator, connect SPORT, alter CoreTimer or guest `CYCLES`, or redesign the
-scheduler without a new explicit unsupported boundary.
+Immutable provenance and reproducibility are established in the linked follow-up.
+The origin of table index 113's `0x8072` value is now diagnosed in the linked
+construction follow-up, and the narrow Random Data Read fix is verified in the
+current checkpoint. Next, reconstruct the exact two-dimensional MDMA0 operation
+and wake eligibility at `018D4736` before proposing any further model change.
+Do not classify the
+software cycle as a hardware wait, optimize guest code, fabricate
+a table terminator, connect SPORT, alter CoreTimer or guest `CYCLES`, or redesign
+the scheduler without a new explicit unsupported boundary.
 
 ## Reproduce
 

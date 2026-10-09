@@ -99,6 +99,7 @@ void MT29F4G08::SendCommand(u8 command) {
 }
 
 void MT29F4G08::HandleCommand(u8 command, u8 completedAddressCycles) {
+    if (command != CMD_RANDOM_READ2) randomReadValid = false;
     switch (command) {
         case CMD_RESET:
             currentCommand = CMD_READ1;
@@ -127,9 +128,13 @@ void MT29F4G08::HandleCommand(u8 command, u8 completedAddressCycles) {
             break;
         case CMD_RANDOM_READ1:
             addressCycle = 0;
+            randomReadValid = pageReadDataReady && !isBusy;
             break;
         case CMD_RANDOM_READ2:
-            if (currentCommand == CMD_RANDOM_READ1) {
+            randomReadValid = randomReadValid && currentCommand == CMD_RANDOM_READ1 &&
+                              completedAddressCycles == COLUMN_CYCLES &&
+                              pageReadDataReady && !isBusy && GetColumnAddress() < PAGE_TOTAL_SIZE;
+            if (randomReadValid) {
                 dataOffset = GetColumnAddress();
             }
             break;
@@ -208,6 +213,8 @@ u8 MT29F4G08::ReadData() {
     if (currentCommand == CMD_READ2 && !pageReadDataReady) {
         return ERASED_VALUE;
     }
+    if (currentCommand == CMD_RANDOM_READ1 ||
+        (currentCommand == CMD_RANDOM_READ2 && !IsDataReady())) return ERASED_VALUE;
     if (dataOffset < PAGE_TOTAL_SIZE) {
         return pageBuffer[dataOffset++];
     }
@@ -234,6 +241,8 @@ u32 MT29F4G08::PageWrite(const u8* data, u32 length) {
 
 u32 MT29F4G08::PageRead(u8* data, u32 length) {
     if (currentCommand == CMD_READ2 && !pageReadDataReady) return 0;
+    if (currentCommand == CMD_RANDOM_READ1 ||
+        (currentCommand == CMD_RANDOM_READ2 && !IsDataReady())) return 0;
     u32 readLen = std::min(length, PAGE_TOTAL_SIZE - dataOffset);
     std::memcpy(data, pageBuffer.data() + dataOffset, readLen);
     dataOffset += readLen;
@@ -245,7 +254,7 @@ void MT29F4G08::SetReadCallback(ReadCallback callback) {
 }
 
 bool MT29F4G08::IsDataReady() const {
-    if (currentCommand == CMD_READ2) {
+    if (currentCommand == CMD_READ2 || (currentCommand == CMD_RANDOM_READ2 && randomReadValid)) {
         return pageReadDataReady && dataOffset < PAGE_TOTAL_SIZE;
     }
     if (currentCommand == CMD_READ_ID) {

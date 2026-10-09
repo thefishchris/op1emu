@@ -511,6 +511,8 @@ void NandPageReadDmaIdleWake() {
     Check(std::remove(imagePath) == 0, "remove NAND DMA fixture");
 }
 
+#include "nand_random_read_cases.h"
+
 void MdmaIdleWake() {
     BlackFinCpu cpu;
     cpu.AttachNandFlash(std::make_shared<IdleNand>());
@@ -586,6 +588,7 @@ int main() {
     NandResetIdleWake();
     NandPageReadIdleWake();
     NandPageReadDmaIdleWake();
+    NandRandomReadAvailability();
     MdmaIdleWake();
     CpuExposure();
     std::puts("execution accounting: all runtime packet-entry cases passed");
