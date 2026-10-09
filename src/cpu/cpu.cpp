@@ -8,6 +8,7 @@
 #include "pll.h"
 #include "guest_clock.h"
 #include "guest_coretimer.h"
+#include "timing_profile.h"
 #include "otp.h"
 #include "gptimer.h"
 #include "dma.h"
@@ -119,28 +120,19 @@ public:
 BlackFinCpu::BlackFinCpu() : pc(0) {
     cpuState_ = std::make_unique<CpuState>();
     memset(cpuState_.get(), 0, sizeof(CpuState));
-    if (const char* value = std::getenv("OP1EMU_SHADOW_TIMING")) {
-        if (std::strcmp(value, "1") != 0 && std::strcmp(value, "0") != 0)
-            throw std::invalid_argument("OP1EMU_SHADOW_TIMING must be 0 or 1");
-        if (std::strcmp(value, "1") == 0) {
-            shadowTiming_ = std::make_unique<ShadowTiming>();
-            cpuState_->shadow_timing = shadowTiming_.get();
-            LogInfo("Shadow timing enabled: observational issue baseline + documented penalties; no device time conversion");
-        }
+    // All timing assumptions are selected and validated in one place
+    // (src/cpu/timing_profile.cpp, docs/emulator-profiles.md).
+    timing_ = ResolveTimingConfigFromEnvironment();
+    LogInfo("Emulator profile=%s assumptions=%zu", EmulatorProfileName(timing_.profile), timing_.assumptions.size());
+    for (const auto& assumption : timing_.assumptions) LogInfo("  timing assumption: %s", assumption.c_str());
+    if (timing_.shadowTiming) {
+        shadowTiming_ = std::make_unique<ShadowTiming>();
+        cpuState_->shadow_timing = shadowTiming_.get();
+        LogInfo("Shadow timing enabled (%s): observational issue baseline + documented penalties; no device time conversion",
+                SettingSourceName(timing_.shadowSource));
     }
-
-    if (const char* value = std::getenv("OP1EMU_EXPERIMENTAL_GUEST_CLOCK")) {
-        if (std::strcmp(value, "1") != 0 && std::strcmp(value, "0") != 0)
-            throw std::invalid_argument("OP1EMU_EXPERIMENTAL_GUEST_CLOCK must be 0 or 1");
-        guestClockMode_ = std::strcmp(value, "1") == 0;
-    }
-    if (const char* value = std::getenv("OP1EMU_GUEST_CLOCK_COST")) {
-        if (std::strcmp(value, "shadow-estimate") == 0) guestCostModel_ = GuestCostModel::ShadowEstimate;
-        else if (std::strcmp(value, "min-cost") != 0)
-            throw std::invalid_argument("OP1EMU_GUEST_CLOCK_COST must be min-cost or shadow-estimate");
-        if (guestCostModel_ == GuestCostModel::ShadowEstimate && !shadowTiming_)
-            throw std::invalid_argument("OP1EMU_GUEST_CLOCK_COST=shadow-estimate requires OP1EMU_SHADOW_TIMING=1");
-    }
+    guestClockMode_ = timing_.guestClock;
+    guestCostModel_ = timing_.costModel;
     if (guestClockMode_)
         LogInfo("Guest clock EXPERIMENTAL: CLKIN-based, cost-model=%s (%s; not cycle accurate); core timer on guest CCLK while awake; "
                 "CCLK-core held in plain IDLE (UNKNOWN); CYCLES, SPORT, RTC, panel TE and GP timers stay on host time",
@@ -148,25 +140,17 @@ BlackFinCpu::BlackFinCpu() : pc(0) {
                 guestCostModel_ == GuestCostModel::MinCost ? "ASSUMED one CCLK per packet entry, lower bound" : "observational shadow estimate");
 
     auto irqHandler = [this](int q, int level) { this->ProcessInterrupt(q, level); };
-    uint64_t experimentalClkin = 0;
-    if (const char* value = std::getenv("OP1EMU_EXPERIMENTAL_CLKIN_HZ")) {
-        // Explicit opt-in only. This is the LIKELY photo-derived experiment,
-        // not an unconditional original-OP-1 oscillator specification.
-        if (std::strcmp(value, "25000000") != 0)
-            throw std::invalid_argument("OP1EMU_EXPERIMENTAL_CLKIN_HZ currently supports only provisional 25000000");
-        experimentalClkin = 25000000;
-        LogInfo("PLL experimental CLKIN=25000000 Hz (PROVISIONAL/LIKELY board-photo inference; disconnected from devices)");
-    }
+    const uint64_t experimentalClkin = timing_.clkinHz;
+    if (experimentalClkin)
+        LogInfo("PLL experimental CLKIN=25000000 Hz (%s; PROVISIONAL/LIKELY board-photo inference; disconnected from devices)",
+                SettingSourceName(timing_.clkinSource));
     pll_ = std::make_shared<BF524PLL>(experimentalClkin);
-    if (const char* value = std::getenv("OP1EMU_EXPERIMENTAL_PLL_AWAKE_BYPASS")) {
-        if (std::strcmp(value, "1") != 0 && std::strcmp(value, "0") != 0)
-            throw std::invalid_argument("OP1EMU_EXPERIMENTAL_PLL_AWAKE_BYPASS must be 0 or 1");
-        awakePLLExperiment_ = std::strcmp(value, "1") == 0 && experimentalClkin && shadowTiming_;
-        if (awakePLLExperiment_)
-            LogInfo("PLL awake-bypass EXPERIMENTAL ideal/no-stall shadow deltas enabled ONLY while temporary CCLK=CLKIN; block-level expiry, no peripheral time conversion");
-        else if (std::strcmp(value, "1") == 0)
-            LogInfo("PLL awake-bypass experiment disabled: explicit provisional CLKIN and OP1EMU_SHADOW_TIMING=1 both required");
-    }
+    awakePLLExperiment_ = timing_.awakeBypass;
+    if (awakePLLExperiment_)
+        LogInfo("PLL awake-bypass EXPERIMENTAL ideal/no-stall shadow deltas enabled (%s) ONLY while temporary CCLK=CLKIN; block-level expiry, no peripheral time conversion",
+                SettingSourceName(timing_.awakeBypassSource));
+    else if (timing_.awakeBypassRequested)
+        LogInfo("PLL awake-bypass experiment disabled: explicit provisional CLKIN and OP1EMU_SHADOW_TIMING=1 both required");
     devices.emplace_back(pll_);
     devices.emplace_back(std::make_shared<MemoryDevice>("L1 SRAM", 0xFFB00000, 0x1000));
     devices.emplace_back(std::make_shared<MemoryDevice>("PORT_MUX", 0xFFC03200, 0x100));

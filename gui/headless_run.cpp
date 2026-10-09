@@ -19,7 +19,7 @@ void Stop(int) { stopRequested.store(true); }
 int RunHeadlessEmulator(int argc, char** argv) {
     try {
         bool snapshot = true, stopOnIdle = false, options = true;
-        std::string script, config = "gui/ui.json", screenshot;
+        std::string script, config = "gui/ui.json", screenshot, profile;
         long limitMs = 0;
         std::vector<std::string> positional;
         auto value = [&](int& i) { if (++i == argc) throw std::runtime_error("Missing option argument"); return std::string(argv[i]); };
@@ -31,6 +31,10 @@ int RunHeadlessEmulator(int argc, char** argv) {
             else if (options && argument == "--nand-rw") snapshot = false;
             else if (options && argument == "--input-script") script = value(i);
             else if (options && argument == "--ui-config") config = value(i);
+            else if (options && argument == "--profile") {
+                profile = value(i);
+                if (profile != "strict" && profile != "functional") throw std::runtime_error("--profile must be strict or functional");
+            }
             else if (options && argument == "--screenshot-on-stop") screenshot = value(i);
             else if (options && argument == "--stop-on-unsupported-idle") stopOnIdle = true;
             else if (options && argument == "--max-runtime") {
@@ -39,6 +43,7 @@ int RunHeadlessEmulator(int argc, char** argv) {
                 limitMs = std::stol(text); if (limitMs < 1 || limitMs > 86400000) throw std::runtime_error("Runtime out of range");
             } else if (options && (argument == "--help" || argument == "-h")) {
                 std::cout << "Usage: op1emu-headless NAND [LDR] [--input-script PATH] [--ui-config PATH]\n"
+                    "  --profile strict|functional (overrides OP1EMU_PROFILE; see docs/emulator-profiles.md)\n"
                     "  --nand-snapshot (default) | --nand-rw\n  --max-runtime MS | --stop-on-unsupported-idle | --screenshot-on-stop NEW.ppm\n"
                     "Commands: keys; press KEY; release KEY; tap KEY [MS]; wait MS; wait-frames N [MS];\n"
                     "  screenshot NEW.ppm; accel X Y Z; accel random; volume N; quit\n"; return 0;
@@ -53,6 +58,8 @@ int RunHeadlessEmulator(int argc, char** argv) {
         catch (...) { if (!script.empty()) close(input); throw; }
         if (!script.empty()) close(input);
         stopRequested.store(false); std::signal(SIGINT, Stop); std::signal(SIGTERM, Stop);
+        // The CLI selection wins over OP1EMU_PROFILE; the CPU resolves it once.
+        if (!profile.empty() && setenv("OP1EMU_PROFILE", profile.c_str(), 1) != 0) throw std::runtime_error("Cannot select profile");
         BlackFinCpu cpu;
         cpu.AttachDisplay(frontend); cpu.AttachKeyboard(frontend); cpu.SetBootMode(0x0D);
         auto nand = std::make_shared<MT29F4G08>(cpu, positional[0], snapshot); cpu.AttachNandFlash(nand);

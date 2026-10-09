@@ -2,6 +2,7 @@
 
 #include "emu.h"
 #include "guest_clock.h"
+#include "timing_profile.h"
 #include <atomic>
 #include <memory>
 #include <vector>
@@ -76,6 +77,8 @@ public:
     const GuestClock& GuestTime() const { return guestClock_; }
     // Guest-clock mode only; null otherwise.
     GuestCoreTimer* GuestTimer() const { return guestCoreTimer_.get(); }
+    // Resolved execution profile and timing assumptions (fixed at construction).
+    const TimingConfig& Timing() const { return timing_; }
     bool Failed() const { return failed_.load(std::memory_order_acquire); }
     BF524PLL& ClockState() { return *pll_; }
     struct AwakePLLStats { uint64_t consumed = 0, overshoot = 0, blocks = 0, expiries = 0; };
@@ -105,6 +108,7 @@ protected:
 
     // Declared before the devices, which may keep a reference to it.
     GuestClock guestClock_;
+    TimingConfig timing_;
     bool guestClockMode_ = false;
     GuestCostModel guestCostModel_ = GuestCostModel::MinCost;
     std::shared_ptr<SIC> sic;
