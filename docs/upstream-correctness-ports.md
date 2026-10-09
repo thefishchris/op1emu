@@ -46,3 +46,23 @@ is observation metadata only. Logs/screenshots/manifests remain private under
 
 No TimeSource, packet-based guest timing, timer fixes, CYCLES conversion,
 profiling, optimizer pipeline, or wholesale upstream submodule update is adopted.
+
+## Bcore poison shifts — 9e02552c58cb88a6cededa1fa71cb8de001665bc
+
+Only the ASHIFT32-by-32 zero result and DEPOSIT X modulo-32 shift-count mask
+were adopted in `src/lift_visitor.cpp`, on top of `37de8e8`. Local Bcore commit
+`ae6b207` contains those two expressions plus independent regressions/docs.
+The parent gitlink records this local audited commit, not upstream's pointer.
+
+Deliberately omitted: Core/JIT init/codegen API changes, optimizing every module,
+TargetMachine/TTI/vectorizer configuration, DataLayout/triple wiring, memcpy/
+memset/memmove symbols, JIT invalidation changes, tools' new optimization options,
+and upstream test-runner modifications. Packet entries, architectural IDLE and
+shadow timing remain unchanged.
+
+Validation: DEPOSIT lengths 0..31, boundary ASHIFT operands, result flags, cached
+execution, and idle accounting pass at existing Core levels 0/1/2. Four generated
+self-checking ELF cases pass through the existing `emu` executable. The external
+assembled matrix could not be built because the Blackfin cross toolchain is
+absent; no result is claimed for it. Parent execution_accounting_tests and all
+nine focused tests, relinked against this Bcore, pass.
