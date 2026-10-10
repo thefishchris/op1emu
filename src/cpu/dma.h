@@ -18,6 +18,10 @@ public:
     // Discard any buffered data. MDMA's internal FIFO is flushed when a new
     // transfer starts; peripheral buses ignore this.
     virtual void DMAFlush() {}
+    // False only when a transfer in this direction (toMemory: peripheral to
+    // memory) is certain to move nothing now and the bus call would have no
+    // side effect, so the channel may skip its staging copy and the call.
+    virtual bool TransferPossible(bool toMemory) const { return true; }
 };
 
 // MDMA source/destination channels are just two ordinary DMA channels

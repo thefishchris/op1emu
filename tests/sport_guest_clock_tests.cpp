@@ -18,6 +18,8 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <memory>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -153,6 +155,55 @@ void DueTicks() {
     rig.now = 5000;
     rig.DrainTx();
     Check(rig.sport.TransmitStartClkin() == 5000u, "re-enable restarts at the next first DMA access");
+}
+
+// DMA fast path: TransferPossible() is false exactly while DMAWrite/DMARead
+// would return 0 without side effects.
+void TransferGate() {
+    Rig rig(0x021F);
+    u8 buffer[1024] = {};
+    Check(rig.sport.TransferPossible(false) && rig.sport.TransferPossible(true),
+          "before the first access after enable the poll must go through (it starts the timeline)");
+    rig.now = 777;
+    Check(rig.sport.DMAWrite(0, 0, buffer, sizeof(buffer)) == 0 && rig.sport.TransmitStartClkin() == 777u,
+          "the first access anchors the transmit timeline");
+    const uint64_t first = 777 + SportClkinForFrames(1, kClkin, kFrameHz);
+    for (uint64_t t : {uint64_t{777}, uint64_t{900}, first - 1}) {
+        rig.now = t;
+        Check(!rig.sport.TransferPossible(false), "before the first frame is due the poll is skipped");
+        Check(rig.sport.DMAWrite(0, 0, buffer, sizeof(buffer)) == 0 && rig.sport.TransmitWords() == 0 &&
+              rig.callbackFrames == 0, "and the skipped call would indeed have moved nothing");
+    }
+    rig.now = first;
+    Check(rig.sport.TransferPossible(false) && rig.sport.DMAWrite(0, 0, buffer, sizeof(buffer)) == 8 &&
+          rig.sport.TransmitWords() == 2, "on the deadline exactly one stereo frame moves");
+    Check(!rig.sport.TransferPossible(false), "after moving it the next frame is not yet due");
+    // Exhaustive agreement over two guest milliseconds with a 16-byte request.
+    for (rig.now = first; rig.now < first + 50000; rig.now += 13) {
+        const bool possible = rig.sport.TransferPossible(false);
+        const uint64_t before = rig.sport.TransmitWords();
+        const u32 moved = rig.sport.DMAWrite(0, 0, buffer, 16);
+        Check(possible == (moved != 0), "gate agrees with the transfer outcome at every probed tick");
+        Check(moved != 0 || rig.sport.TransmitWords() == before, "a zero-length call changed nothing");
+    }
+    rig.sport.Write32(TCR1, 0);
+    Check(!rig.sport.TransferPossible(false), "disabled: DMAWrite returns 0 at once, so the poll is skipped");
+    rig.sport.Write32(TCR1, 1);
+    Check(rig.sport.TransferPossible(false), "re-enabled: the first access must go through again");
+    rig.now = 123456;
+    rig.sport.DMAWrite(0, 0, buffer, sizeof(buffer));
+    Check(rig.sport.TransmitStartClkin() == 123456u && !rig.sport.TransferPossible(false) &&
+          rig.sport.TransferPossible(true), "re-anchored at the new first access; RX, never accessed, is independent");
+    rig.sport.Write32(TCR2, 0x001F); // Mono: one word per frame.
+    rig.now = 123456 + SportClkinForFrames(1, kClkin, kFrameHz);
+    Check(rig.sport.TransferPossible(false) && rig.sport.DMAWrite(0, 0, buffer, sizeof(buffer)) == 4,
+          "the gate follows a frame-format change");
+    SPORT legacy(0xFFC00800, 0);
+    legacy.Write32(TCR1, 1);
+    Check(legacy.TransferPossible(false) && legacy.TransferPossible(true), "legacy host-time pacing is never gated");
+    rig.sport.SetTransferGating(false);
+    rig.now = 123457 + SportClkinForFrames(1, kClkin, kFrameHz);
+    Check(rig.sport.TransferPossible(false), "gating can be disabled for equivalence tests");
 }
 
 void Validation() {
@@ -356,6 +407,86 @@ void CoreTimerAndSportShareTheTimeline() {
           "SPORT words due at a core-timer timestamp are serviced before the wake decision");
 }
 
+// Forwards to SPORT0 and counts the calls that reach it.
+class CountingBus final : public DMABus {
+public:
+    explicit CountingBus(std::shared_ptr<SPORT> sport) : sport_(std::move(sport)) {}
+    u32 DMARead(int x, int y, void* dest, u32 length) override { ++reads; return sport_->DMARead(x, y, dest, length); }
+    u32 DMAWrite(int x, int y, const void* source, u32 length) override { ++writes; return sport_->DMAWrite(x, y, source, length); }
+    bool TransferPossible(bool toMemory) const override { return sport_->TransferPossible(toMemory); }
+    uint64_t reads = 0, writes = 0;
+private:
+    std::shared_ptr<SPORT> sport_;
+};
+
+class AwakeCpu : public TestCpu {
+public:
+    std::shared_ptr<CountingBus> Count() {
+        auto bus = std::make_shared<CountingBus>(sport0);
+        dma->AttachDMABus(DMAPeripheralSPORT0Tx, bus);
+        dma->AttachDMABus(DMAPeripheralSPORT0Rx, bus);
+        return bus;
+    }
+};
+
+struct AwakeTrace {
+    std::vector<uint64_t> events; // (run, clkin, words, row state) at every change
+    uint64_t completions = 0, reads = 0, writes = 0, runs = 0;
+};
+
+// Awake spin (JUMP self at 0x200) with SPORT0 DMA running, short rows so the
+// row cadence is exercised; SPORT TX is disabled and re-enabled mid-run.
+AwakeTrace RunAwake(bool gating) {
+    ScopedEnv profile("OP1EMU_PROFILE", "functional");
+    AwakeCpu cpu;
+    auto bus = cpu.Count();
+    cpu.Sport(0).SetTransferGating(gating);
+    LoadProgram(cpu, 0);
+    cpu.GetEmulator().MemoryWrite16(0x200, 0x2000); // JUMP.S 0x200: stay awake.
+    cpu.Write(DMA3 + X_COUNT, 16);
+    cpu.Write(DMA3 + CONFIG, 0x108B);
+    cpu.Write(DMA4 + X_COUNT, 24);
+    cpu.Write(DMA4 + CONFIG, 0x1089);
+    AwakeTrace trace;
+    uint64_t lastWords = UINT64_MAX;
+    for (uint64_t run = 0; run < 2400000; ++run) {
+        if (run == 1200000) { cpu.Write(SPORT0 + TCR1, 0); cpu.Write(SPORT0 + TCR1, 1); }
+        cpu.Run();
+        Check(!cpu.UnsupportedIdle() && !cpu.Failed(), "awake run continues");
+        if (cpu.Read(DMA3 + IRQ_STATUS) & 1u) {
+            ++trace.completions;
+            trace.events.insert(trace.events.end(), {run, cpu.GuestTime().ClkinTicks(), 0xC0u});
+            cpu.Write(DMA3 + IRQ_STATUS, 1);
+        }
+        const uint64_t words = cpu.Sport(0).TransmitWords() * 1000003u + cpu.Sport(0).ReceiveWords();
+        if (words != lastWords) {
+            lastWords = words;
+            trace.events.insert(trace.events.end(), {run, cpu.GuestTime().ClkinTicks(), words,
+                                                     cpu.Read(DMA3 + CURR_X_COUNT), cpu.Read(DMA4 + CURR_X_COUNT),
+                                                     cpu.Read(SIC_ISR0)});
+        }
+    }
+    trace.reads = bus->reads;
+    trace.writes = bus->writes;
+    trace.runs = 2400000;
+    return trace;
+}
+
+void GatedPollingIsEquivalent() {
+    const AwakeTrace ungated = RunAwake(false);
+    const AwakeTrace gated = RunAwake(true);
+    Check(gated.events == ungated.events && gated.completions == ungated.completions,
+          "words, row positions, SIC state and DMA completions are identical at every block");
+    Check(gated.completions > 10, "the run crosses many RX row completions");
+    std::printf("gated polling: %llu blocks, %llu RX completions, SPORT writes %llu -> %llu, reads %llu -> %llu\n",
+                static_cast<unsigned long long>(gated.runs), static_cast<unsigned long long>(gated.completions),
+                static_cast<unsigned long long>(ungated.writes), static_cast<unsigned long long>(gated.writes),
+                static_cast<unsigned long long>(ungated.reads), static_cast<unsigned long long>(gated.reads));
+    Check(ungated.writes >= gated.runs && ungated.reads >= gated.runs, "ungated: SPORT polled on every block");
+    Check(gated.writes * 50 < ungated.writes && gated.reads * 50 < ungated.reads,
+          "gated: SPORT reached only around frame deadlines");
+}
+
 void StrictAndUnsetNeverPaceOnGuestClock() {
     {
         ScopedEnv profile("OP1EMU_PROFILE", "strict");
@@ -387,10 +518,12 @@ int main() {
     NoDrift();
     NoHostTime();
     DueTicks();
+    TransferGate();
     Validation();
     IdleFollowsSportDeadlinesWithoutWaking();
     IwrDmaInterruptWakesAtItsDeadline();
     CoreTimerAndSportShareTheTimeline();
+    GatedPollingIsEquivalent();
     StrictAndUnsetNeverPaceOnGuestClock();
     std::puts("sport guest clock tests passed");
     return 0;

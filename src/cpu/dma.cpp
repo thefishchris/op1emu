@@ -234,6 +234,10 @@ u32 DMAChannel::ProcessTransfer() {
         LogWarn("DMA channel %s: No DMA bus attached for peripheral type %d", Name().c_str(), peripheralType);
         return 0;
     }
+    // Nothing can move: the full path would read the staging data, receive
+    // zero bytes and change no channel state. A zero CURR_X_COUNT still takes
+    // the full path, which completes the row.
+    if (currXCount != 0 && !bus->TransferPossible(memoryWrite)) return 0;
 
     int elementBytes = 1 << wordSize;
     u32 totalBytes = currXCount * elementBytes;

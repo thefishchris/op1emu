@@ -61,6 +61,14 @@ public:
     // holds no whole frame.
     std::optional<uint64_t> TransmitDueClkin(u32 bytes) const;
     std::optional<uint64_t> ReceiveDueClkin(u32 bytes) const;
+    // DMA fast path (guest pacing only): false while DMARead (toMemory) or
+    // DMAWrite is certain to return 0 without side effects, i.e. the direction
+    // is disabled, or it has started and fewer than one whole frame beyond the
+    // words already moved is due. Before the first access after enable it is
+    // true, so that access still starts the timeline. Legacy pacing: true.
+    bool TransferPossible(bool toMemory) const override;
+    // Equivalence tests compare against the ungated path; default on.
+    void SetTransferGating(bool enabled) { transferGating_ = enabled; }
     // Words moved since the direction was enabled.
     uint64_t TransmitWords() const { return totalTxSamplesDelivered_; }
     uint64_t ReceiveWords() const { return totalRxSamplesDelivered_; }
@@ -133,4 +141,11 @@ protected:
     SportGuestClock guestClock_;
     uint64_t dmaTxStartClkin_ = 0;
     uint64_t dmaRxStartClkin_ = 0;
+    // Cached first CLKIN tick at which a direction can move a frame, keyed by
+    // the state it depends on.
+    struct TransferGate {
+        uint64_t start = 0, delivered = 0, channels = 0, dueClkin = 0;
+    };
+    mutable TransferGate txGate_, rxGate_;
+    bool transferGating_ = true;
 };

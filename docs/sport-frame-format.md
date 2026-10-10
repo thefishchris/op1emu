@@ -316,3 +316,38 @@ had `OP1EMU_AUDIO_PACING_DIVISOR=10` set; the log reports it as ignored.
   - left channel: a smooth signal (RMS about 0.006 FS; first-difference/energy
     0.059 and 0.066; zero-crossing rate 0.14 and 0.17);
   - right channel: zero, as before.
+
+### DMA polling fast path (performance only)
+
+While awake, every executed guest block polls each running DMA channel. For
+a guest-paced SPORT direction, almost every poll found no frame due: 99.9%
+of 25–31M SPORT calls per guest second returned zero. For TX, each one also
+copied the remaining row into the staging buffer first.
+
+`SPORT::TransferPossible()` (a `DMABus` hook) now lets
+`DMAChannel::ProcessTransfer` return before the copy and the call. It
+returns false only when the call would return 0 without side effects:
+- the direction is disabled; or
+- it has started and the guest CLKIN is still before
+  `start + SportClkinForFrames(ceil(moved / words per frame) + 1)`, the
+  first tick at which one more whole frame is due. The tick is cached, keyed
+  by start, words moved and words per frame.
+
+The hook returns true:
+- before the first access after enable, which still sets the start;
+- for legacy host-time pacing, which is never gated;
+- whenever `CURR_X_COUNT` is 0, since that path completes the row.
+
+Guest-visible behaviour is unchanged:
+- **Test:** `tests/sport_guest_clock_tests.cpp` compares gated and ungated
+  polling block by block over 2.4M awake blocks, including 33 row
+  completions and a disable/re-enable. Words, row positions, SIC state and
+  completions are identical, while SPORT calls drop from 2.4M to about 270
+  per direction.
+- **Firmware (v241, functional, same script):**
+  - SPORT calls and TX staging copies dropped from 25–31M to 28–33k per
+    guest second;
+  - 88,200 words per direction per guest second;
+  - 689.1 completions per direction per guest second;
+  - IRQ28 = TX completions;
+  - blocks per host second rose 8–11% in the SPORT-active phases.

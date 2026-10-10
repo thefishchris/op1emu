@@ -248,6 +248,23 @@ std::optional<uint64_t> SPORT::ReceiveDueClkin(u32 bytes) const {
                          receiveWordLength, receiveStereoFrameSync, bytes);
 }
 
+bool SPORT::TransferPossible(bool toMemory) const {
+    if (!guestClock_ || !transferGating_) return true;
+    if (!(toMemory ? receiveEnabled : transmitEnabled)) return false; // DMARead/DMAWrite return 0 at once.
+    if (!(toMemory ? dmaRxActive_ : dmaTxActive_)) return true;       // This access starts the timeline.
+    const uint64_t start = toMemory ? dmaRxStartClkin_ : dmaTxStartClkin_;
+    const uint64_t delivered = toMemory ? totalRxSamplesDelivered_ : totalTxSamplesDelivered_;
+    const uint64_t channels = (toMemory ? receiveStereoFrameSync : transmitStereoFrameSync) ? 2 : 1;
+    TransferGate& gate = toMemory ? rxGate_ : txGate_;
+    if (gate.start != start || gate.delivered != delivered || gate.channels != channels) {
+        // DMARead/DMAWrite move data only when words due - delivered >= one
+        // frame, i.e. frames due >= ceil(delivered / channels) + 1.
+        const uint64_t frames = (delivered + channels - 1) / channels + 1;
+        gate = {start, delivered, channels, start + SportClkinForFrames(frames, guestClock_.clkinHz, guestClock_.frameHz)};
+    }
+    return guestClock_.clkinTicks() >= gate.dueClkin;
+}
+
 SportConfig2 DecodeSportConfig2(u32 value) {
     return SportConfig2{static_cast<int>(value & 0x1Fu) + 1, (value & 0x100u) != 0, (value & 0x200u) != 0,
                         (value & 0x400u) != 0};
