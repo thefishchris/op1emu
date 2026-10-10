@@ -246,11 +246,7 @@ BlackFinCpu::BlackFinCpu() : pc(0) {
 
     sic = std::make_shared<SIC>(0xFFC00100);
     sic->SetInterruptForwardCallback([this](int ivg, int level) {
-        if (level) {
-            QueueEvent([this, ivg]() {
-                cec_raise(cpuState_.get(), ivg);
-            });
-        }
+        if (level) QueueInterruptRaise(ivg);
     });
     devices.push_back(sic);
     if (guestClockMode_) {
@@ -774,8 +770,30 @@ void BlackFinCpu::QueueEvent(const std::function<void()>& event, std::chrono::na
     eventQueue.push_back({delay, event});
 }
 
+// One SIC forward = one cec_raise(ivg) event. Raises queued in the same epoch
+// by this call site carry the same delay and therefore run in the same
+// ProcessEvents pass. Within a pass a repeated raise of the same IVG cannot
+// change anything: cec_raise only ORs ILAT[ivg] and sets the pending flag
+// (both already done by the first), no event clears ILAT or dispatches, and
+// after a user-mode raise has taken the exception every later raise returns
+// on did_jump. So the repeats are not queued. Different IVGs, other events,
+// and raises in later passes are untouched.
+void BlackFinCpu::QueueInterruptRaise(int ivg) {
+    std::unique_lock<std::recursive_mutex> lock(eventQueueMutex);
+    ++raiseStats_.requested;
+    if (ivg >= 0 && ivg < 16) {
+        if (raiseDedupe_ && raiseQueuedEpoch_[ivg] == eventPassEpoch_) return;
+        raiseQueuedEpoch_[ivg] = eventPassEpoch_;
+    }
+    ++raiseStats_.queued;
+    QueueEvent([this, ivg]() {
+        cec_raise(cpuState_.get(), ivg);
+    });
+}
+
 void BlackFinCpu::ProcessEvents() {
     std::unique_lock<std::recursive_mutex> lock(eventQueueMutex);
+    ++eventPassEpoch_; // Odd: events queued during this pass.
     constexpr std::chrono::nanoseconds instructionTime(1); // Approximate instruction execution time
     auto events = eventQueue;
     for (auto& [delay, event] : events) {
@@ -794,6 +812,7 @@ void BlackFinCpu::ProcessEvents() {
         }
     }
     elapsedTime += instructionTime;
+    ++eventPassEpoch_; // Even: events queued before the next pass.
 }
 
 void BlackFinCpu::AttachDisplay(const std::shared_ptr<Display>& display) {

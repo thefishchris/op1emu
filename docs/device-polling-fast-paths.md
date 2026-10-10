@@ -93,3 +93,63 @@ FIFO contents, which can only shrink, so they can never create work.
     at enable and at about 8 host seconds later);
   - blocks per host second +18–19% in the SPORT-active phases;
   - SPORT, DMA, IRQ28 and core timer cadences unchanged.
+
+## SIC -> CEC raise de-duplication (`BlackFinCpu::QueueInterruptRaise`)
+
+### Path (unchanged)
+
+1. A device calls `SIC::SetInterruptLevel(pin, level)`.
+2. `SIC::ForwardInterrupts()` re-forwards **every** pending, unmasked source
+   on every call, including unchanged levels from unrelated devices.
+3. Each forward queues one `cec_raise(ivg)` event.
+4. `ProcessEvents()` runs the queued events once per `Run()`, or on an IDLE
+   wake.
+
+Evidence kept locally (`sic-forwarding-investigation`) found 99.97% of about
+19.9M forwards per guest second in v241 to be such re-forwards. Most are
+re-forwards of one GPIO line that stays asserted.
+
+### What is de-duplicated
+
+- **Key:** the core interrupt level (IVG), together with the event-pass epoch.
+- **Epoch:** `ProcessEvents()` increments it on entry and on exit, so it is
+  odd during a pass and even between passes.
+- **Same pass:** raises queued in the same epoch by this one call site carry
+  the same delay. Their remaining delays are decremented together, so they
+  execute in the same pass.
+- **Rule:** a raise of an IVG already queued in the current epoch is not
+  queued again.
+
+### Why it is exact
+
+Within one pass, a repeated `cec_raise(ivg)` cannot change anything:
+- it only ORs `ILAT[ivg]` and sets the pending flag, both already done by the
+  first raise;
+- no queued event clears ILAT or dispatches, because dispatch happens in
+  `cec_check_pending` outside the pass;
+- once a raise in user mode has taken the illegal-use exception, every later
+  raise in the pass returns on `did_jump`.
+
+The key is the IVG, not the SIC pin, because the raise event carries only
+the IVG. Different IVGs, other event types, and raises in later passes are
+untouched. The current re-forward, re-latch-while-in-service and
+re-pend-at-RTI behaviour is preserved exactly. Making it match the documented
+level-sensitive semantics is a separate, guest-visible change.
+
+### Evidence
+
+`tests/interrupt_raise_dedupe_tests.cpp` runs the ten investigation scenarios
+with and without de-duplication and compares the full per-block trace: PC,
+RETI, SEQSTAT, IMASK, IPEND, ILAT, SIC ISR/IMASK/IAR and ISR entry order.
+All traces are identical. It also checks the pass scope directly.
+
+v241 functional firmware A/B (same script, concurrent runs), per guest second:
+- **Queued raise events:** 18.0–22.8M → 3.7–4.8M.
+- **Cadence:** SPORT, DMA, IRQ28 and core timer cadence identical. ISR entry
+  rates per IVG agree within run-to-run variation; host-time devices keep
+  firmware runs nondeterministic.
+- **Throughput:** unchanged within noise (−1% to +3% blocks per CPU-second).
+  The remaining per-forward cost (`SIC::ForwardInterrupts`, the forward
+  callback and the event-queue lock per request) dominates. The worthwhile
+  reduction is forwarding only on real transitions, which is guest-visible
+  and separate.
