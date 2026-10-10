@@ -47,6 +47,12 @@ struct TimingConfig {
     // (core timer) advances during plain architectural IDLE. ASSUMED, not a
     // CONFIRMED BF524 behaviour; never set by strict or unset profiles.
     bool coreTimerRunsInIdle = false;
+    // Functional profile with the guest clock and a CLKIN frequency only:
+    // the externally clocked SPORT0/1 frame rate in Hz, used to pace SPORT on
+    // guest CLKIN time. ASSUMED 44100 (LIKELY from firmware audio-engine
+    // evidence, docs/sport-frame-format.md); the physical codec MCLK is
+    // UNKNOWN. 0: SPORT keeps its legacy host-time pacing.
+    uint32_t sportFrameHz = 0;
     // Every enabled timing assumption, with its evidence label. Empty when
     // nothing beyond the evidence-backed model is in effect.
     std::vector<std::string> assumptions;

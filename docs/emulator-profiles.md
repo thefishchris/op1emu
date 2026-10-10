@@ -5,12 +5,13 @@ selected, validated and listed in one place, `src/cpu/timing_profile.cpp`,
 and reported at startup:
 
 ```text
-Emulator profile=functional assumptions=5
+Emulator profile=functional assumptions=6
   timing assumption: CLKIN=25000000 Hz: PROVISIONAL/LIKELY (board-photo inference), not CONFIRMED
   timing assumption: PLL awake bypass: ...: EXPERIMENTAL
   timing assumption: shadow timing: observational issue model, used here as the awake-bypass cycle source
   timing assumption: guest clock cost model min-cost: ASSUMED, not cycle accurate
   timing assumption: ASSUMED: CoreTimer continues during plain IDLE for functional profile (...); not CONFIRMED BF524 behaviour
+  timing assumption: ASSUMED: external SPORT0 audio clock corresponds to 44.1 kHz native frame rate (LIKELY from firmware audio-engine evidence; codec MCLK inferred as 11.2896 MHz); ...
 ```
 
 | Profile | Purpose | May stop at unresolved hardware behaviour? |
@@ -25,10 +26,15 @@ Neither profile fakes hardware state.
   no packet spinning through IDLE.
 - **PLL:** registers come from the PLL model in both; nothing is a silent
   zero.
-- **Host time:** neither profile adds host-time guest semantics. The
-  pre-existing SPORT ÷10 slowdown is a profile-independent TEMPORARY HACK.
-  The legacy core timer's ÷10 applies only without the guest clock (strict or
-  unset). Functional uses the guest-clock core timer, which has no slowdown.
+- **Host time:** neither profile adds host-time guest semantics.
+  - **SPORT:** the pre-existing ÷10 slowdown is a TEMPORARY HACK. It applies
+    only without the functional guest clock (strict, unset, or functional with
+    `OP1EMU_EXPERIMENTAL_GUEST_CLOCK=0`). Functional paces SPORT on the guest
+    clock at the ASSUMED 44.1 kHz frame rate, with no slowdown and no host
+    time.
+  - **Core timer:** the legacy ÷10 applies only without the guest clock
+    (strict or unset). Functional uses the guest-clock core timer, which has
+    no slowdown.
 
 ## Selecting a profile
 
@@ -62,7 +68,7 @@ Neither profile fakes hardware state.
 | `OP1EMU_EXPERIMENTAL_CLKIN_HZ` | unset (no CLKIN Hz) | provisional board CLKIN (LIKELY 25 MHz); prerequisite of the awake bypass | **rejected** | set to 25000000 | yes; overrides the profile |
 | `OP1EMU_SHADOW_TIMING` | 0 | observational shadow issue model; cycle source of the awake bypass | allowed (observational) | set to 1 | yes; overrides the profile |
 | `OP1EMU_EXPERIMENTAL_PLL_AWAKE_BYPASS` | 0 | advance the same-value-VR bypass countdown (CCLK=CLKIN) from awake shadow deltas | `=1` **rejected**, `=0` allowed | set to 1 | yes; overrides the profile |
-| `OP1EMU_EXPERIMENTAL_GUEST_CLOCK` | 0 | guest clock and HRM core timer (docs/guest-clock-architecture.md) | allowed, opt-in; a running core timer **holds** plain IDLE | set to 1; enables the plain-IDLE core-timer assumption | yes; `=0` under functional also drops that assumption |
+| `OP1EMU_EXPERIMENTAL_GUEST_CLOCK` | 0 | guest clock and HRM core timer (docs/guest-clock-architecture.md) | allowed, opt-in; a running core timer **holds** plain IDLE; SPORT stays on host time | set to 1; enables the plain-IDLE core-timer and 44.1 kHz SPORT frame-rate assumptions | yes; `=0` under functional also drops both assumptions |
 | `OP1EMU_GUEST_CLOCK_COST` | `min-cost` | guest clock cost model | allowed | not set | yes |
 | `OP1EMU_TRACE_CLOCK` | 0 | MMIO clock-observation trace | allowed | not set | yes |
 
@@ -70,7 +76,9 @@ Some controls exist only in uncommitted local work at the time of writing:
 `OP1EMU_AUDIO_PACING_DIVISOR` (defaults to the same ÷10), `OP1EMU_OTP_FILE`,
 `OP1EMU_GPIO_MODEL` (defaults to 17), and the `OP1EMU_TRACE_*` and
 `OP1EMU_TIMING_PROBE` diagnostics. The profiles do not set them, and none is
-needed for the v241 boot at its default.
+needed for the v241 boot at its default. The pacing divisor affects only the
+legacy host-time SPORT pacing; under the functional guest clock it is ignored
+(and logged as ignored).
 
 ## What each profile assumes
 
@@ -95,13 +103,24 @@ needed for the v241 boot at its default.
     timer's IVG6 may wake the core. This is not a CONFIRMED BF524 behaviour:
     the documentary search found no answer, and the counterfactual shows the
     choice is guest-observable (guest-clock architecture §10–§11).
+  - **SPORT frame rate = 44.1 kHz, ASSUMED** (since 2026-10-09).
+    - CONFIRMED: SPORT0 is externally clocked.
+    - LIKELY: 44.1 kHz is the firmware's engine rate, implying an 11.2896 MHz
+      codec MCLK.
+    - UNKNOWN: the physical clock, which has not been measured.
+    - In effect: SPORT words are paced on guest CLKIN (44,100 frames and
+      88,200 stereo words per guest second) instead of host time. Details are
+      in `docs/sport-frame-format.md`.
 
   IDLE then advances deterministically to the earliest modelled deadline (PLL
-  lock or core timer expiry), with no packet spinning and no host time. The
+  lock, core timer expiry, or the end of a SPORT DMA row), with no packet
+  spinning and no host time. A SPORT deadline wakes the core only through a
+  DMA interrupt enabled in `SIC_IWR`. The
   v241 fixture boots to the tape UI, crosses the boot-ROM PLL IDLE and the
   power-manager IDLE `0x019F18F4`, and stays interactive.
-- **strict** never applies that assumption: core timer during plain IDLE =
-  UNKNOWN, and a running core timer is a `held-domain-active` stop.
+- **strict** never applies these assumptions: core timer during plain IDLE =
+  UNKNOWN, and a running core timer is a `held-domain-active` stop; SPORT
+  stays on the legacy host-time pacing.
 
 ## Reproducible commands
 

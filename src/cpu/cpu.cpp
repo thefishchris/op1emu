@@ -136,9 +136,10 @@ BlackFinCpu::BlackFinCpu() : pc(0) {
     guestCostModel_ = timing_.costModel;
     if (guestClockMode_)
         LogInfo("Guest clock EXPERIMENTAL: CLKIN-based, cost-model=%s (%s; not cycle accurate); core timer on guest CCLK while awake; "
-                "CCLK-core held in plain IDLE (UNKNOWN); CYCLES, SPORT, RTC, panel TE and GP timers stay on host time",
+                "CCLK-core held in plain IDLE (UNKNOWN); CYCLES, %sRTC, panel TE and GP timers stay on host time",
                 GuestCostModelName(guestCostModel_),
-                guestCostModel_ == GuestCostModel::MinCost ? "ASSUMED one CCLK per packet entry, lower bound" : "observational shadow estimate");
+                guestCostModel_ == GuestCostModel::MinCost ? "ASSUMED one CCLK per packet entry, lower bound" : "observational shadow estimate",
+                timing_.sportFrameHz ? "" : "SPORT, ");
 
     auto irqHandler = [this](int q, int level) { this->ProcessInterrupt(q, level); };
     const uint64_t experimentalClkin = timing_.clkinHz;
@@ -180,6 +181,14 @@ BlackFinCpu::BlackFinCpu() : pc(0) {
     devices.emplace_back(sport0);
     sport1 = std::make_shared<SPORT>(0xFFC00900, 1);
     devices.emplace_back(sport1);
+    if (timing_.sportFrameHz) {
+        // Functional profile only: the ASSUMED external frame rate on guest CLKIN.
+        const SportGuestClock sportClock{[this] { return guestClock_.ClkinTicks(); }, timing_.clkinHz, timing_.sportFrameHz};
+        sport0->UseGuestClock(sportClock);
+        sport1->UseGuestClock(sportClock);
+        LogInfo("SPORT guest-clock pacing: %u frames/s on CLKIN %llu Hz (ASSUMED frame rate; words = frames x words per frame; "
+                "no host time)", timing_.sportFrameHz, static_cast<unsigned long long>(timing_.clkinHz));
+    }
     // OP-1 seems only use last byte of DSPID, which is 0x02 for BF524 rev 02
     devices.emplace_back(std::make_shared<Jtag>(0xFFE05000, 0x02));
     devices.emplace_back(std::make_shared<BootROM>(0xEF000000));
@@ -551,6 +560,7 @@ void BlackFinCpu::ServiceIdle() {
     nfc->ServiceIdleCompletion();
     if (nfc->PageReadDMAReady()) dma->ServiceIdleNFCReadCompletion();
     dma->ServiceIdleMDMACompletion();
+    ServiceSportDma(); // Words due at the current guest time, before the wake check.
     FunctionalIdleStep step = FunctionalIdleStep::None;
     if (!pll_->WakeAsserted() && !sic->WakePending()) {
         if (timing_.coreTimerRunsInIdle) {
@@ -618,7 +628,8 @@ BlackFinCpu::FunctionalIdleStep BlackFinCpu::AdvanceFunctionalIdle() {
     guestClock_.SetRatios(pll_->Ratios());
     const auto pllTicks = pll_->NextDeadlineTicks();
     const auto timerExpiry = guestCoreTimer_->NextExpiryCclk();
-    if (!pllTicks && !timerExpiry) return FunctionalIdleStep::None;
+    const auto sportTick = NextSportDmaDeadline();
+    if (!pllTicks && !timerExpiry && !sportTick) return FunctionalIdleStep::None;
     if (!guestClock_.Ratios()) {
         ReportUnsupportedIdle("functional idle deadline needs known clock ratios");
         return FunctionalIdleStep::Stopped;
@@ -626,25 +637,34 @@ BlackFinCpu::FunctionalIdleStep BlackFinCpu::AdvanceFunctionalIdle() {
     // Candidates in exact sub-tick units of the canonical CLKIN timeline:
     // the PLL lock (CLKIN domain, CONFIRMED to run in IDLE, wakes via DPMC)
     // and the core timer expiry (CCLK-core domain, ASSUMED running in plain
-    // IDLE for this profile, wakes via direct CEC IVG6).
+    // IDLE for this profile, wakes via direct CEC IVG6), and the end of a
+    // SPORT DMA row (external clock at the ASSUMED frame rate; DMA is not a
+    // core clock domain and keeps running in IDLE). Reaching a SPORT deadline
+    // does not itself wake: a DMA interrupt wakes only through SIC_IWR.
     const uint64_t pllUnits = pllTicks ? guestClock_.UnitsToClkinEdges(*pllTicks) : UINT64_MAX;
     const uint64_t timerUnits = timerExpiry ? guestClock_.UnitsToCclk(*timerExpiry) : UINT64_MAX;
-    const uint64_t units = std::min(pllUnits, timerUnits);
+    const uint64_t sportUnits = sportTick ? guestClock_.UnitsToClkinEdges(*sportTick - guestClock_.ClkinTicks()) : UINT64_MAX;
+    const uint64_t units = std::min({pllUnits, timerUnits, sportUnits});
     const u32 tcountBefore = guestCoreTimer_->CurrentCount();
     const uint64_t clkinBefore = guestClock_.ClkinTicks();
     guestClock_.AdvanceIdleUnits(units, true);
     pll_->AdvanceClkin(guestClock_.ClkinTicks() - clkinBefore);
-    // Simultaneous deadlines are both serviced here before any wake decision.
+    // Every event at this timestamp is serviced here before any wake decision:
+    // SPORT DMA words due (any DMA interrupt is latched in SIC), then the core timer.
+    const uint64_t sportBytes = ServiceSportDma();
     const uint64_t expiries = guestCoreTimer_->Sync();
     guestClock_.SetRatios(pll_->Ratios());
-    const char* source = pllUnits == timerUnits ? "pll+coretimer" : (units == pllUnits ? "pll" : "coretimer");
+    std::string source;
+    for (const auto& [candidate, name] : {std::pair{pllUnits, "pll"}, std::pair{timerUnits, "coretimer"}, std::pair{sportUnits, "sport"}})
+        if (candidate == units) source += source.empty() ? name : std::string("+") + name;
     if (units == pllUnits || functionalIdleAdvances_ < 32 || (functionalIdleAdvances_ & (functionalIdleAdvances_ - 1)) == 0) {
         const auto& ratios = guestClock_.Ratios();
         LogInfo("functional-idle-advance source=%s idle-pc=%08X units=%llu clkin=%llu cclk=%llu tcount=%08X->%08X expiries=%llu "
-                "pll-remaining=%llu ratios=%u/%u/%u packets=%llu advances=%llu (ASSUMED plain-IDLE core timer)",
-                source, cpuState_->idle_pc, static_cast<unsigned long long>(units),
+                "sport-bytes=%llu pll-remaining=%llu ratios=%u/%u/%u packets=%llu advances=%llu (ASSUMED plain-IDLE core timer)",
+                source.c_str(), cpuState_->idle_pc, static_cast<unsigned long long>(units),
                 static_cast<unsigned long long>(guestClock_.ClkinTicks()), static_cast<unsigned long long>(guestClock_.CclkCycles()),
                 tcountBefore, guestCoreTimer_->CurrentCount(), static_cast<unsigned long long>(expiries),
+                static_cast<unsigned long long>(sportBytes),
                 static_cast<unsigned long long>(pll_->NextDeadlineTicks().value_or(0)),
                 ratios ? ratios->unitsPerClkin : 0u, ratios ? ratios->cclkUnits : 0u, ratios ? ratios->sclkUnits : 0u,
                 static_cast<unsigned long long>(cpuState_->packet_entries),
@@ -653,6 +673,33 @@ BlackFinCpu::FunctionalIdleStep BlackFinCpu::AdvanceFunctionalIdle() {
     ++functionalIdleAdvances_;
     if (expiries) cec_check_pending(cpuState_.get()); // IVG6 latched by Sync(); dispatch ends IDLE if eligible.
     return FunctionalIdleStep::Advanced;
+}
+
+namespace {
+constexpr DMAPeripheralType kSportDmaTypes[] = {DMAPeripheralSPORT0Rx, DMAPeripheralSPORT0Tx,
+                                                DMAPeripheralSPORT1Rx, DMAPeripheralSPORT1Tx};
+}
+
+std::optional<uint64_t> BlackFinCpu::NextSportDmaDeadline() const {
+    std::optional<uint64_t> earliest;
+    for (const DMAPeripheralType type : kSportDmaTypes) {
+        const auto bytes = dma->PeripheralRowBytesRemaining(type);
+        if (!bytes) continue;
+        const SPORT& sport = (type == DMAPeripheralSPORT0Rx || type == DMAPeripheralSPORT0Tx) ? *sport0 : *sport1;
+        const bool receive = type == DMAPeripheralSPORT0Rx || type == DMAPeripheralSPORT1Rx;
+        const auto tick = receive ? sport.ReceiveDueClkin(*bytes) : sport.TransmitDueClkin(*bytes);
+        // A deadline not in the future cannot make progress (servicing already
+        // moved every word due); it is not a candidate.
+        if (tick && *tick > guestClock_.ClkinTicks() && (!earliest || *tick < *earliest)) earliest = tick;
+    }
+    return earliest;
+}
+
+uint64_t BlackFinCpu::ServiceSportDma() {
+    if (!timing_.sportFrameHz) return 0;
+    uint64_t bytes = 0;
+    for (const DMAPeripheralType type : kSportDmaTypes) bytes += dma->ServicePeripheral(type);
+    return bytes;
 }
 
 void BlackFinCpu::ReportHeldDomainIdle() {

@@ -1,6 +1,7 @@
 #include "sport.h"
 #include "emu.h"
 #include "utils/log.h"
+#include <stdexcept>
 
 enum DataFormat {
     NORMAL = 0,
@@ -117,17 +118,23 @@ u32 SPORT::DMARead(int x, int y, void* dest, u32 length)
 
     // Start timing on first DMA call after SPORT enable
     if (!dmaRxActive_) {
-        dmaRxStartTime_ = std::chrono::steady_clock::now();
+        if (guestClock_) dmaRxStartClkin_ = guestClock_.clkinTicks();
+        else dmaRxStartTime_ = std::chrono::steady_clock::now();
         totalRxSamplesDelivered_ = 0;
         dmaRxActive_ = true;
     }
 
     // How many samples are due based on elapsed time?
-    auto elapsed = std::chrono::steady_clock::now() - dmaRxStartTime_;
-    uint64_t elapsedNs = std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
-    uint64_t totalDue = (elapsedNs * sampleRateHz_) / 1'000'000'000ULL;
-    // FIXME: too slow, / 10
-    totalDue = totalDue / 10;
+    uint64_t totalDue = 0;
+    if (guestClock_) {
+        totalDue = GuestWordsDue(dmaRxStartClkin_, channels);
+    } else {
+        auto elapsed = std::chrono::steady_clock::now() - dmaRxStartTime_;
+        uint64_t elapsedNs = std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
+        totalDue = (elapsedNs * sampleRateHz_) / 1'000'000'000ULL;
+        // FIXME: too slow, / 10
+        totalDue = totalDue / 10;
+    }
     uint64_t available = (totalDue > totalRxSamplesDelivered_)
                          ? (totalDue - totalRxSamplesDelivered_) : 0;
 
@@ -165,17 +172,23 @@ u32 SPORT::DMAWrite(int x, int y, const void* source, u32 length)
 
     // Start timing on first DMA call after SPORT enable
     if (!dmaTxActive_) {
-        dmaTxStartTime_ = std::chrono::steady_clock::now();
+        if (guestClock_) dmaTxStartClkin_ = guestClock_.clkinTicks();
+        else dmaTxStartTime_ = std::chrono::steady_clock::now();
         totalTxSamplesDelivered_ = 0;
         dmaTxActive_ = true;
     }
 
     // How many samples are due based on elapsed time?
-    auto elapsed = std::chrono::steady_clock::now() - dmaTxStartTime_;
-    uint64_t elapsedNs = std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
-    uint64_t totalDue = (elapsedNs * sampleRateHz_) / 1'000'000'000ULL;
-    // FIXME: too slow, / 10
-    totalDue = totalDue / 10;
+    uint64_t totalDue = 0;
+    if (guestClock_) {
+        totalDue = GuestWordsDue(dmaTxStartClkin_, channels);
+    } else {
+        auto elapsed = std::chrono::steady_clock::now() - dmaTxStartTime_;
+        uint64_t elapsedNs = std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
+        totalDue = (elapsedNs * sampleRateHz_) / 1'000'000'000ULL;
+        // FIXME: too slow, / 10
+        totalDue = totalDue / 10;
+    }
     uint64_t available = (totalDue > totalTxSamplesDelivered_)
                          ? (totalDue - totalTxSamplesDelivered_) : 0;
 
@@ -190,6 +203,49 @@ u32 SPORT::DMAWrite(int x, int y, const void* source, u32 length)
 
     totalTxSamplesDelivered_ += available;
     return static_cast<u32>(frames * static_cast<uint64_t>(frameSize));
+}
+
+uint64_t SportFramesDue(uint64_t elapsedClkin, uint64_t clkinHz, uint64_t frameHz) {
+    return (elapsedClkin / clkinHz) * frameHz + ((elapsedClkin % clkinHz) * frameHz) / clkinHz;
+}
+
+uint64_t SportClkinForFrames(uint64_t frames, uint64_t clkinHz, uint64_t frameHz) {
+    const uint64_t rest = frames % frameHz;
+    return (frames / frameHz) * clkinHz + (rest * clkinHz + frameHz - 1) / frameHz;
+}
+
+void SPORT::UseGuestClock(SportGuestClock clock) {
+    if (!clock || clock.clkinHz > (uint64_t{1} << 32) || clock.frameHz > (uint64_t{1} << 31))
+        throw std::invalid_argument("SPORT guest clock needs a CLKIN source, CLKIN <= 2^32 Hz and frame rate <= 2^31 Hz");
+    guestClock_ = std::move(clock);
+}
+
+uint64_t SPORT::GuestWordsDue(uint64_t startClkin, int channels) const {
+    const uint64_t now = guestClock_.clkinTicks();
+    const uint64_t elapsed = now >= startClkin ? now - startClkin : 0;
+    return SportFramesDue(elapsed, guestClock_.clkinHz, guestClock_.frameHz) * static_cast<uint64_t>(channels);
+}
+
+std::optional<uint64_t> SPORT::GuestDueClkin(bool enabled, bool active, uint64_t startClkin, uint64_t delivered,
+                                             int wordBits, bool stereo, u32 bytes) const {
+    if (!guestClock_ || !enabled || !active) return std::nullopt;
+    // Mirrors DMARead/DMAWrite: whole words, then whole frames.
+    const uint64_t wordBytes = wordBits > 16 ? 4 : 2;
+    const uint64_t channels = stereo ? 2 : 1;
+    const uint64_t frames = bytes / wordBytes / channels;
+    if (frames == 0) return std::nullopt;
+    const uint64_t deliveredFrames = (delivered + channels - 1) / channels;
+    return startClkin + SportClkinForFrames(deliveredFrames + frames, guestClock_.clkinHz, guestClock_.frameHz);
+}
+
+std::optional<uint64_t> SPORT::TransmitDueClkin(u32 bytes) const {
+    return GuestDueClkin(transmitEnabled, dmaTxActive_, dmaTxStartClkin_, totalTxSamplesDelivered_,
+                         transmitWordLength, transmitStereoFrameSync, bytes);
+}
+
+std::optional<uint64_t> SPORT::ReceiveDueClkin(u32 bytes) const {
+    return GuestDueClkin(receiveEnabled, dmaRxActive_, dmaRxStartClkin_, totalRxSamplesDelivered_,
+                         receiveWordLength, receiveStereoFrameSync, bytes);
 }
 
 SportConfig2 DecodeSportConfig2(u32 value) {

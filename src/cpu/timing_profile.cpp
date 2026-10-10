@@ -6,6 +6,9 @@
 
 namespace {
 constexpr uint64_t kProvisionalClkinHz = 25000000;
+// Functional-profile SPORT frame rate (docs/sport-frame-format.md): codec
+// MCLK 11.2896 MHz / 256 under the observed CS42L52 single-speed R_128 setup.
+constexpr uint32_t kAssumedSportFrameHz = 44100;
 
 std::optional<bool> Flag(const EnvironmentLookup& environment, const char* name) {
     const char* value = environment(name);
@@ -83,6 +86,7 @@ TimingConfig ResolveTimingConfig(const EnvironmentLookup& environment) {
         config.guestClockSource = SettingSource::Profile;
     }
     config.coreTimerRunsInIdle = functional && config.guestClock;
+    if (functional && config.guestClock && config.clkinHz) config.sportFrameHz = kAssumedSportFrameHz;
     if (const char* value = environment("OP1EMU_GUEST_CLOCK_COST")) {
         if (std::strcmp(value, "shadow-estimate") == 0) config.costModel = GuestCostModel::ShadowEstimate;
         else if (std::strcmp(value, "min-cost") != 0)
@@ -105,6 +109,10 @@ TimingConfig ResolveTimingConfig(const EnvironmentLookup& environment) {
     if (config.coreTimerRunsInIdle)
         config.assumptions.push_back("ASSUMED: CoreTimer continues during plain IDLE for functional profile "
                                      "(CCLK-core domain advances; IVG6 may wake); not CONFIRMED BF524 behaviour");
+    if (config.sportFrameHz)
+        config.assumptions.push_back("ASSUMED: external SPORT0 audio clock corresponds to 44.1 kHz native frame rate "
+                                     "(LIKELY from firmware audio-engine evidence; codec MCLK inferred as 11.2896 MHz); "
+                                     "SPORT paced on guest CLKIN, physical clock UNKNOWN");
     return config;
 }
 

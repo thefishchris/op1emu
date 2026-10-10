@@ -60,7 +60,7 @@ void StrictRejectsProvisionalAssumptions() {
     const auto allowed = Resolve({{"OP1EMU_PROFILE", "strict"}, {"OP1EMU_EXPERIMENTAL_PLL_AWAKE_BYPASS", "0"},
                                   {"OP1EMU_SHADOW_TIMING", "1"}, {"OP1EMU_EXPERIMENTAL_GUEST_CLOCK", "1"}});
     Check(allowed.shadowTiming && allowed.guestClock && !allowed.awakeBypass && !allowed.coreTimerRunsInIdle &&
-          allowed.assumptions.size() == 1, "strict keeps shadow timing and the opt-in guest clock, never the plain-IDLE core timer");
+          !allowed.sportFrameHz && allowed.assumptions.size() == 1, "strict keeps shadow timing and the opt-in guest clock, never the plain-IDLE core timer");
 }
 
 void FunctionalEnablesKnownGoodBootAssumptions() {
@@ -69,23 +69,31 @@ void FunctionalEnablesKnownGoodBootAssumptions() {
           functional.shadowTiming && functional.awakeBypass && functional.guestClock &&
           functional.coreTimerRunsInIdle && functional.guestClockSource == SettingSource::Profile &&
           functional.clkinSource == SettingSource::Profile && functional.shadowSource == SettingSource::Profile &&
-          functional.awakeBypassSource == SettingSource::Profile && functional.assumptions.size() == 5,
-          "functional enables CLKIN, shadow timing, the awake bypass, the guest clock and the plain-IDLE core timer, and lists all five");
-    Check(functional.assumptions.back().rfind("ASSUMED: CoreTimer continues during plain IDLE for functional profile", 0) == 0,
+          functional.awakeBypassSource == SettingSource::Profile && functional.sportFrameHz == 44100 &&
+          functional.assumptions.size() == 6,
+          "functional enables CLKIN, shadow timing, the awake bypass, the guest clock, the plain-IDLE core timer and "
+          "the 44.1 kHz SPORT frame rate, and lists all six");
+    Check(functional.assumptions[4].rfind("ASSUMED: CoreTimer continues during plain IDLE for functional profile", 0) == 0,
           "the plain-IDLE core timer assumption is labelled ASSUMED");
+    Check(functional.assumptions[5].rfind("ASSUMED: external SPORT0 audio clock corresponds to 44.1 kHz native frame rate "
+                                          "(LIKELY from firmware audio-engine evidence; codec MCLK inferred as 11.2896 MHz)", 0) == 0,
+          "the SPORT frame rate assumption is labelled ASSUMED, with its LIKELY evidence");
     const auto noGuest = Resolve({{"OP1EMU_PROFILE", "functional"}, {"OP1EMU_EXPERIMENTAL_GUEST_CLOCK", "0"}});
-    Check(!noGuest.guestClock && !noGuest.coreTimerRunsInIdle && noGuest.assumptions.size() == 3,
-          "without the guest clock the plain-IDLE core timer assumption is not applied");
+    Check(!noGuest.guestClock && !noGuest.coreTimerRunsInIdle && !noGuest.sportFrameHz && noGuest.assumptions.size() == 3,
+          "without the guest clock neither the plain-IDLE core timer nor the SPORT frame rate is applied");
+    const auto unsetGuest = Resolve({{"OP1EMU_EXPERIMENTAL_CLKIN_HZ", "25000000"}, {"OP1EMU_EXPERIMENTAL_GUEST_CLOCK", "1"}});
+    Check(unsetGuest.guestClock && unsetGuest.clkinHz && !unsetGuest.sportFrameHz,
+          "the SPORT frame rate is a functional-profile assumption only");
     const auto noShadow = Resolve({{"OP1EMU_PROFILE", "functional"}, {"OP1EMU_SHADOW_TIMING", "0"}});
     Check(!noShadow.shadowTiming && noShadow.shadowSource == SettingSource::Environment &&
           noShadow.awakeBypassRequested && !noShadow.awakeBypass, "an explicit variable overrides the profile default");
     const auto noBypass = Resolve({{"OP1EMU_PROFILE", "functional"}, {"OP1EMU_EXPERIMENTAL_PLL_AWAKE_BYPASS", "0"}});
-    Check(noBypass.clkinHz && noBypass.shadowTiming && !noBypass.awakeBypass && noBypass.assumptions.size() == 3,
+    Check(noBypass.clkinHz && noBypass.shadowTiming && !noBypass.awakeBypass && noBypass.assumptions.size() == 4,
           "the bypass can be switched off individually");
     const auto guest = Resolve({{"OP1EMU_PROFILE", "functional"}, {"OP1EMU_EXPERIMENTAL_GUEST_CLOCK", "1"},
                                 {"OP1EMU_GUEST_CLOCK_COST", "shadow-estimate"}});
     Check(guest.guestClock && guest.guestClockSource == SettingSource::Environment &&
-          guest.costModel == GuestCostModel::ShadowEstimate && guest.assumptions.size() == 5,
+          guest.costModel == GuestCostModel::ShadowEstimate && guest.assumptions.size() == 6,
           "shadow-estimate satisfied by the profile's shadow timing");
 }
 

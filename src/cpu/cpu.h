@@ -7,6 +7,7 @@
 #include <memory>
 #include <vector>
 #include <chrono>
+#include <optional>
 
 // Forward declarations for bcore types (headers included in cpu.cpp only)
 struct CpuState;
@@ -79,6 +80,7 @@ public:
     GuestCoreTimer* GuestTimer() const { return guestCoreTimer_.get(); }
     // Resolved execution profile and timing assumptions (fixed at construction).
     const TimingConfig& Timing() const { return timing_; }
+    SPORT& Sport(int index) { return index ? *sport1 : *sport0; }
     bool Failed() const { return failed_.load(std::memory_order_acquire); }
     BF524PLL& ClockState() { return *pll_; }
     struct AwakePLLStats { uint64_t consumed = 0, overshoot = 0, blocks = 0, expiries = 0; };
@@ -107,8 +109,15 @@ protected:
     void ReportHeldDomainIdle();
     enum class FunctionalIdleStep { None, Advanced, Stopped };
     // Functional profile only: advance architectural IDLE to the earliest
-    // modelled deadline (PLL lock, core timer expiry). One step per call.
+    // modelled deadline (PLL lock, core timer expiry, SPORT DMA row end).
+    // One step per call.
     FunctionalIdleStep AdvanceFunctionalIdle();
+    // Guest-paced SPORT only: the earliest future CLKIN tick at which a
+    // running SPORT DMA channel can finish its current row.
+    std::optional<uint64_t> NextSportDmaDeadline() const;
+    // Guest-paced SPORT only: move every SPORT DMA word due at the current
+    // guest time. Interrupts follow the normal DMA -> SIC routing.
+    uint64_t ServiceSportDma();
 
     // Declared before the devices, which may keep a reference to it.
     GuestClock guestClock_;

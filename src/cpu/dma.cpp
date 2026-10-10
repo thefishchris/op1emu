@@ -23,6 +23,7 @@ public:
     bool IsIdleMDMADestinationFor(const DMAChannel& source) const;
     bool IsCompleted() const { return completed; }
     DMAPeripheralType GetPeripheralType() const { return peripheralType; }
+    u32 RowBytesRemaining() const { return currXCount * (1u << wordSize); }
 
     u32 ProcessTransfer();
 
@@ -384,6 +385,27 @@ void DMA::ProcessWithInterrupt(int ivg) {
             total += moved;
         }
     }
+}
+
+std::optional<u32> DMA::PeripheralRowBytesRemaining(DMAPeripheralType type) const {
+    std::optional<u32> fewest;
+    for (const auto& channel : channels) {
+        if (channel->IsMDMA() || !channel->IsEnabled() || !channel->IsRunning() ||
+            channel->GetPeripheralType() != type)
+            continue;
+        const u32 bytes = channel->RowBytesRemaining();
+        if (!fewest || bytes < *fewest) fewest = bytes;
+    }
+    return fewest;
+}
+
+uint64_t DMA::ServicePeripheral(DMAPeripheralType type) {
+    uint64_t total = 0;
+    for (auto& channel : channels) {
+        if (channel->IsMDMA() || channel->GetPeripheralType() != type) continue;
+        while (const u32 moved = channel->ProcessTransfer()) total += moved;
+    }
+    return total;
 }
 
 bool DMA::ServiceIdleNFCReadCompletion() {

@@ -55,10 +55,13 @@ SPORT clock work.
 
 ## External audio clock: MCLK and sample-rate investigation (2026-10-09)
 
-Decision: **the codec master clock, and therefore the SPORT0 frame rate, are
-UNKNOWN.** No SPORT guest-clock pacing is implemented, and no 48 kHz value is
-assumed. The emulator's fixed `sampleRateHz_ = 48000` remains an unsourced
-legacy constant.
+Decision at the time: **the codec master clock, and therefore the SPORT0
+frame rate, are UNKNOWN.** No 48 kHz value is assumed. The emulator's fixed
+`sampleRateHz_ = 48000` remains an unsourced legacy constant, used only by the
+legacy host-time pacing. Firmware static analysis later found a LIKELY
+44.1 kHz engine rate, which the functional profile now assumes (see
+"Functional-profile guest-clock pacing" below). The physical clock is still
+unmeasured.
 
 ### SPORT0 is externally clocked (CONFIRMED)
 
@@ -157,3 +160,159 @@ Any one of:
   `COMM` sample rate), if it reflects the codec rate rather than a resampled
   export;
 - tracing the firmware's use of the 48000/44100 constants in the audio path.
+
+## Functional-profile guest-clock pacing (2026-10-09)
+
+### Labels
+
+- **CONFIRMED:** SPORT0 is externally clocked (`TCR1`/`RCR1` = `0x4400`,
+  dividers never written); the codec is a CS42L52; the frame format is
+  `0x021F` (32-bit words, stereo L/R frame sync, primary side, left first).
+- **LIKELY:** the native audio engine rate is 44.1 kHz, from firmware static
+  analysis (tape AIFC `COMM` writer, `BodeAudioEngine` 1/44100, clip database,
+  sampler prelisten, rate arithmetic; no 48000 use). Under the observed codec
+  setup (single speed, `R_128`, frame = MCLK/256) that means
+  MCLK = 11.2896 MHz.
+- **ASSUMED:** the functional emulation uses a 44,100 Hz SPORT frame rate.
+  The startup log lists it: `ASSUMED: external SPORT0 audio clock corresponds
+  to 44.1 kHz native frame rate (LIKELY from firmware audio-engine evidence;
+  codec MCLK inferred as 11.2896 MHz)`.
+- **UNKNOWN:** the physical MCLK/LRCK, which has not been measured on hardware.
+
+### Scope
+
+- The assumption lives in `src/cpu/timing_profile.cpp`
+  (`TimingConfig::sportFrameHz`). Only the functional profile with the guest
+  clock and a CLKIN frequency sets it.
+- `strict`, unset, and functional with `OP1EMU_EXPERIMENTAL_GUEST_CLOCK=0`
+  keep the legacy host-time pacing unchanged, including its ÷10 slowdown.
+- In guest mode SPORT reads no host time, so the ÷10 slowdown and the local
+  `OP1EMU_AUDIO_PACING_DIVISOR` control have no effect.
+
+### Scheduling
+
+Exact integer arithmetic on the canonical guest CLKIN timeline. There is no
+floating point, no accumulated rounding, and no host time.
+
+- **Start:** each direction's start is the guest CLKIN tick of its first DMA
+  access after `TSPEN`/`RSPEN`. This is the legacy anchor point, kept. Underrun
+  before DMA starts is not modelled.
+- **Frames due** after `e` CLKIN ticks:
+  `floor(e × 44100 / 25,000,000)`, evaluated as
+  `(e / CLKIN) × fs + (e mod CLKIN) × fs / CLKIN` (`SportFramesDue`). It is
+  exact and has no intermediate overflow.
+- **Words due** = frames due × words per frame. The words per frame come from
+  the decoded `TCR2`/`RCR2` (`TSFSE`/`RSFSE`), with no special case for
+  `0x021F`:
+  - stereo: 2 words per frame, so **88,200 words per guest second**;
+  - mono: 1 word per frame, 44,100 words per guest second.
+- **Delivery:** DMA requests are satisfied with whole frames up to the words
+  due, as before. The difference is that time is now guest time.
+- **Deadline:** the first tick with `N` frames due is
+  `ceil(N × CLKIN / fs)` (`SportClkinForFrames`).
+- **IDLE:** functional IDLE (`AdvanceFunctionalIdle`) adds a third candidate
+  next to the PLL lock and the core timer. It is the earliest tick at which a
+  running SPORT DMA channel can finish its current row, the only point where
+  completion, a data interrupt, an autobuffer reload or a descriptor fetch
+  occurs. SPORT is externally clocked and DMA is not a core clock domain, so
+  both keep running in IDLE (SCLK peripherals, guest-clock architecture §3).
+- **Each step:**
+  1. advance to the earliest candidate;
+  2. move every SPORT DMA word due at that timestamp, on all four SPORT DMA
+     peripheral types;
+  3. sync the core timer;
+  4. only then let the wake decision run.
+
+  SPORT words due at the current time are also moved on IDLE entry, before the
+  wake check. Equal deadlines share one step.
+- **Wakes:** reaching a SPORT deadline never wakes the core by itself. A DMA
+  interrupt raised at the deadline follows the existing DMA → SIC path and
+  wakes only through `SIC_IWR`, exactly like any other SIC source.
+- **Clock domains:** guest CLKIN advances while awake only when the PLL ratios
+  are known. Before that, SPORT time does not advance; this is a lower bound,
+  as for the rest of the guest clock.
+
+### Preserved behaviour (observed, not changed)
+
+- **DMA:** the DMA and interrupt routing is unchanged.
+- **Bound DMA interrupts:** the emulator binds DMA interrupts only for
+  channels 0–3 and 12–15. Under the default peripheral map, SPORT0 TX (DMA4,
+  SIC IRQ 17) completions raise no interrupt. v241 remaps one SPORT0
+  direction onto DMA1: its SIC IRQ 28 rises matched the SPORT completion
+  count exactly in both runs below, so the firmware's audio interrupt is
+  delivered.
+- **SIC forwarding delay:** in the committed code the SIC → CEC forward is queued with the
+  default 1 ns `QueueEvent` delay, so an IWR wake latches its IVG at the next
+  awake `ProcessEvents`.
+
+### Tests
+
+`tests/sport_guest_clock_tests.cpp` covers:
+- exact arithmetic and first-tick deadlines;
+- 44,100 frames and 88,200 stereo words per guest second;
+- mono at 32 and 16 bits;
+- no drift over ten guest seconds with irregular steps;
+- no host time (frozen guest time stays frozen while host time passes);
+- disable/re-enable;
+- in functional IDLE: deadline ordering, exact RX completion cadence (3,445
+  rows of 128 frames in ten guest seconds), no wake without an IWR source, an
+  IWR-enabled DMA3 wake exactly at its row deadline, and interleaving with the
+  core timer;
+- the host-time divisor variable having no effect;
+- strict, unset and functional without the guest clock never pacing SPORT on
+  the guest clock.
+
+`tests/sport_config_tests.cpp` still pins the stereo decode.
+
+### Firmware results (v241, functional profile, snapshot NAND, two runs)
+
+Setup: an isolated diagnostic build of this change, with per-host-second
+counters and the guest-word capture; none of that instrumentation is
+committed. Each run used the same headless script as the earlier audio
+diagnosis: boot, two UI screenshots, play/stop, three held notes. Both runs
+had `OP1EMU_AUDIO_PACING_DIVISOR=10` set; the log reports it as ignored.
+
+| | run A | run B |
+| --- | --- | --- |
+| SPORT start (host / guest CLKIN) | 154.1 s / 32,703,696 | 146.9 s / 32,677,543 |
+| guest/host ratio, boot to SPORT start | 0.0085 | 0.0089 |
+| guest/host ratio, SPORT running | 0.0265 | 0.0264 |
+| guest seconds with SPORT running | 8.25 | 8.32 |
+| TX and RX words per guest s | 88,200.2 | 88,200.1 |
+| SPORT DMA completions per guest s (each direction) | 689.07 | 689.05 |
+| SIC IRQ 28 rises = completions | 5,683 = 5,683 | 5,733 = 5,733 |
+| core timer expiries per guest s | 1,000.0 | 1,000.0 |
+
+- **Cadence:** 689.06 completions per guest second is 88,200 / 128 words
+  (64-frame rows). Before this change, the same firmware showed 37.5
+  completions and 4,800 words per *host* second under ÷10 host pacing. The
+  0.1-word excess is sampling skew between counters read at host-second
+  boundaries. Words due are exact by construction and by test.
+- **IDLE:** SPORT row deadlines appear as functional-IDLE steps at the
+  power-manager IDLE `019F18F4` (`source=sport`, with words moved at each
+  step). There was no unsupported boundary, no assertion, and both runs exited
+  normally.
+- **UI:**
+  - The tape UI appears.
+  - `play` runs the transport; the counter advances.
+  - `stop` holds it.
+  - The held notes show the synth indicator.
+  - Panel TE is still on host time, so UI frames per *guest* second (about
+    240) are not meaningful.
+- **Starvation:** the guest runs at about 1/38 of real time, so SPORT delivers
+  about 1,400 frames per host second against a 48,000 Hz host device. That is
+  about 98% underrun, now caused entirely by execution throughput rather than
+  pacing (the host sink also still resamples nothing: it plays 44.1 kHz frames
+  at 48 kHz). Live audio is not real time.
+- **Determinism:**
+  - The SPORT arithmetic is deterministic.
+  - Firmware-level runs are not: boot already diverges because RTC, panel TE
+    and GP timers use host time. The two word captures are identical for the
+    first 200 frames (the first nonzero sample is at frame 72 in both), then
+    differ.
+- **Offline audio:** the captured guest words are written as 44.1 kHz,
+  32-bit stereo WAV files (evidence kept locally, not committed). Loudest
+  second, at 7.25 guest s:
+  - left channel: a smooth signal (RMS about 0.006 FS; first-difference/energy
+    0.059 and 0.066; zero-crossing rate 0.14 and 0.17);
+  - right channel: zero, as before.

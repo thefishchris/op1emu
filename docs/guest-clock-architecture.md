@@ -758,3 +758,53 @@ no PC special case.
   `019F18F4` entry (packets 1,294,447,509 versus 1,290,260,068), because SPORT,
   RTC, panel TE and GP timers still use host time. The idle mechanism itself
   is host-time free. Full repeatability needs those devices on the guest clock.
+
+## 12. SPORT on the guest clock (revision 6, functional profile)
+
+### 12.1 Assumption and scope
+
+SPORT0 is CONFIRMED externally clocked, so neither SCLK nor the SPORT dividers
+set its rate. The functional profile **ASSUMES a 44,100 Hz frame rate**. The
+evidence is LIKELY (firmware engine rate; MCLK inferred as 11.2896 MHz); the
+physical clock is UNKNOWN (unmeasured). The labels, the arithmetic and the
+evidence are in `docs/sport-frame-format.md`. `strict` and unset profiles never
+apply the assumption: SPORT keeps host-time pacing there, and it is never
+IDLE-eligible (D4).
+
+### 12.2 Timeline and IDLE arbitration
+
+- **Words due:** a pure function of guest CLKIN since each direction's first
+  DMA access: `floor(Δclkin × fs / CLKIN)` frames × words per frame. The
+  stereo `0x021F` configuration gives 88,200 words per guest second.
+- **Deadline candidate:** `AdvanceFunctionalIdle` gains a third candidate. It
+  is the earliest CLKIN tick at which a running SPORT DMA channel can finish
+  its current row (`DMA::PeripheralRowBytesRemaining`, then
+  `SPORT::{Transmit,Receive}DueClkin`). Only a strictly future tick is a
+  candidate, so an unsatisfiable row never stalls the timeline.
+- **Domain:** SPORT is externally clocked and DMA is an SCLK-domain block, so
+  it keeps running in plain IDLE (§3). No new IDLE-domain assumption is
+  needed beyond the frame rate itself.
+- **Order within a step:**
+  1. advance to the earliest candidate;
+  2. `ServiceSportDma()` moves every SPORT word due at that timestamp, across
+     all SPORT DMA channels (repeated transfers until nothing moves);
+  3. sync the core timer;
+  4. wake evaluation (D5).
+
+  `ServiceIdle` also services SPORT DMA at the current time before its wake
+  check, so a DMA interrupt due at IDLE entry is seen.
+- **Wakes:** event occurrence is independent of CPU wake. A DMA completion
+  latches `DMA_DONE` and the SIC `ISR` bit. It ends IDLE only if the source is
+  enabled in `SIC_IWR`; reaching a SPORT deadline does not wake the core by
+  itself.
+
+### 12.3 Remaining host-time sources
+
+After this change, these remain on host time in the functional profile:
+- RTC;
+- panel TE;
+- GP timers;
+- `CYCLES`;
+- `QueueEvent` delays.
+
+Firmware-level repeatability is therefore still not expected.

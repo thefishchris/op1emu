@@ -23,6 +23,23 @@ struct SportConfig2 {
 
 SportConfig2 DecodeSportConfig2(u32 value);
 
+// Guest-time SPORT pacing (functional profile only; docs/sport-frame-format.md).
+// SPORT0's serial and frame clocks are external, so the word rate is the frame
+// rate times the words per frame, timed on guest CLKIN with exact integer
+// arithmetic. No host time is read.
+struct SportGuestClock {
+    std::function<uint64_t()> clkinTicks; // Current guest CLKIN tick.
+    uint64_t clkinHz = 0;                 // Must not exceed 2^32.
+    uint64_t frameHz = 0;                 // Must not exceed 2^31.
+    explicit operator bool() const { return clkinTicks && clkinHz && frameHz; }
+};
+
+// Whole frames due `elapsedClkin` ticks after the start:
+// floor(elapsedClkin * frameHz / clkinHz), without intermediate overflow.
+uint64_t SportFramesDue(uint64_t elapsedClkin, uint64_t clkinHz, uint64_t frameHz);
+// Smallest elapsed CLKIN count at which `frames` frames are due.
+uint64_t SportClkinForFrames(uint64_t frames, uint64_t clkinHz, uint64_t frameHz);
+
 class SPORT : public RegisterDevice, public DMABus {
 public:
     using AudioOutputCallback = std::function<void(const void* data, size_t samples, int channels, int bitsPerSample)>;
@@ -33,6 +50,23 @@ public:
     // Decoded TCR2 / RCR2 frame settings.
     SportConfig2 TransmitConfig2() const;
     SportConfig2 ReceiveConfig2() const;
+
+    // Pace both directions on guest CLKIN instead of host time. Throws
+    // std::invalid_argument for an incomplete or out-of-range clock.
+    void UseGuestClock(SportGuestClock clock);
+    bool GuestPaced() const { return static_cast<bool>(guestClock_); }
+    // Guest pacing only: the CLKIN tick at which a DMA request of `bytes`
+    // can be satisfied in full, as whole frames; nullopt when the direction
+    // is disabled, has not started (no DMA access since enable), or `bytes`
+    // holds no whole frame.
+    std::optional<uint64_t> TransmitDueClkin(u32 bytes) const;
+    std::optional<uint64_t> ReceiveDueClkin(u32 bytes) const;
+    // Words moved since the direction was enabled.
+    uint64_t TransmitWords() const { return totalTxSamplesDelivered_; }
+    uint64_t ReceiveWords() const { return totalRxSamplesDelivered_; }
+    // Guest pacing: CLKIN tick of the first DMA access since enable.
+    std::optional<uint64_t> TransmitStartClkin() const { return guestClock_ && dmaTxActive_ ? std::optional<uint64_t>(dmaTxStartClkin_) : std::nullopt; }
+    std::optional<uint64_t> ReceiveStartClkin() const { return guestClock_ && dmaRxActive_ ? std::optional<uint64_t>(dmaRxStartClkin_) : std::nullopt; }
 
     // DMABus interface
     u32 DMARead(int x, int y, void* dest, u32 length) override;
@@ -45,6 +79,9 @@ public:
 protected:
     void SetTransmitEnable();
     void SetReceiveEnable();
+    uint64_t GuestWordsDue(uint64_t startClkin, int channels) const;
+    std::optional<uint64_t> GuestDueClkin(bool enabled, bool active, uint64_t startClkin, uint64_t delivered,
+                                          int wordBits, bool stereo, u32 bytes) const;
 
     int sportNumber;
 
@@ -90,4 +127,10 @@ protected:
 
     // Nominal sample rate in Hz (future: derive from TCLKDIV/TFSDIV registers)
     uint32_t sampleRateHz_ = 48000;
+
+    // Guest pacing (UseGuestClock): CLKIN tick of each direction's first DMA
+    // access after enable. Words due = frames due x words per frame.
+    SportGuestClock guestClock_;
+    uint64_t dmaTxStartClkin_ = 0;
+    uint64_t dmaRxStartClkin_ = 0;
 };

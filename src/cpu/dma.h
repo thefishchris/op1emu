@@ -5,6 +5,7 @@
 #include <vector>
 #include <map>
 #include <memory>
+#include <optional>
 
 class Bus;
 
@@ -81,6 +82,14 @@ public:
     void BindInterrupt(int channel, int q, InterruptHandler callback);
     bool ServiceIdleNFCReadCompletion();
     bool ServiceIdleMDMACompletion();
+    // Running peripheral channels mapped to `type`: the fewest bytes left in
+    // a current row (the next point where completion, an interrupt or a
+    // descriptor fetch can occur); nullopt if no such channel runs.
+    std::optional<u32> PeripheralRowBytesRemaining(DMAPeripheralType type) const;
+    // Run every channel mapped to `type` until none moves data; returns the
+    // bytes moved. Rate-limited peripherals only (each call moves only what
+    // the peripheral has due).
+    uint64_t ServicePeripheral(DMAPeripheralType type);
 
     std::shared_ptr<DMABus> GetDMABus(DMAPeripheralType type) { return dmaBuses[type]; }
     Emulator& GetEmulator() { return emulator; }
