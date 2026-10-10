@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "dma.h"
 #include "utils/log.h"
 #include <stdint.h>
@@ -378,6 +379,21 @@ u32 DMA::Read32(u32 offset) {
 // bounded by FIFO capacity; MDMA_BURST_BYTES is just an extra guard against
 // FLOW=Autobuffer auto-restarting the transfer indefinitely.
 static constexpr u32 MDMA_BURST_BYTES = 4096;
+
+uint64_t DMA::NoOpUntilClkin() const {
+    uint64_t until = UINT64_MAX;
+    for (size_t i = 0; i < channels.size(); i++) {
+        if (!(activeChannels & (1u << i))) continue;
+        const auto& channel = channels[i];
+        if (channel->IsMDMA() || channel->RowBytesRemaining() == 0) return 0;
+        const auto bus = dmaBuses.find(channel->GetPeripheralType());
+        if (bus == dmaBuses.end() || !bus->second) return 0;
+        const uint64_t from = bus->second->TransferPossibleFrom(channel->WritesMemory());
+        if (from == 0) return 0;
+        until = std::min(until, from);
+    }
+    return until;
+}
 
 bool DMA::ServiceIsNoOp() {
     for (size_t i = 0; i < channels.size(); i++) {

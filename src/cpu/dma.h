@@ -22,6 +22,10 @@ public:
     // memory) is certain to move nothing now and the bus call would have no
     // side effect, so the channel may skip its staging copy and the call.
     virtual bool TransferPossible(bool toMemory) const { return true; }
+    // The guest CLKIN tick from which TransferPossible(toMemory) is true while
+    // only guest time changes: 0 = true now regardless of guest time,
+    // UINT64_MAX = false until other state changes.
+    virtual uint64_t TransferPossibleFrom(bool toMemory) const { return 0; }
 };
 
 // MDMA source/destination channels are just two ordinary DMA channels
@@ -113,6 +117,10 @@ public:
     // SPORT before its next frame). MDMA and any other active channel are not
     // idle.
     bool ServiceIsNoOp() override;
+    // The guest CLKIN tick before which ServiceIsNoOp() stays true while only
+    // guest time changes (no MMR write, service pass or event); 0 when it is
+    // false now. ServiceIsNoOp() == (current tick < NoOpUntilClkin()).
+    uint64_t NoOpUntilClkin() const;
     void SetActiveChannelTracking(bool enabled) { activeTracking = enabled; }
     // Memory written by peripheral-to-memory transfers (state comparison):
     // a byte count, and with tracking on an FNV-1a hash of address and data.

@@ -283,6 +283,9 @@ protected:
     // Host-time interval in which RTC_STAT keeps the value the batch's full
     // proof saw (RTC::StatStableInterval); only MMR writes or Tick() change it.
     std::chrono::system_clock::time_point rtcStableFrom_, rtcStableUntil_;
+    // Guest CLKIN tick from which the DMA pass has work (DMA::NoOpUntilClkin at
+    // the batch's full proof); only guest time changes it within a batch.
+    uint64_t dmaQuietUntilClkin_ = 0;
     std::vector<u32> batchStopPCs_;
     MultiBlockStats multiBlockStats_;
     std::function<void()> blockObserver_;

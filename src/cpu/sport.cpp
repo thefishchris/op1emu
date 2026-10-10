@@ -249,9 +249,18 @@ std::optional<uint64_t> SPORT::ReceiveDueClkin(u32 bytes) const {
 }
 
 bool SPORT::TransferPossible(bool toMemory) const {
-    if (!guestClock_ || !transferGating_) return true;
-    if (!(toMemory ? receiveEnabled : transmitEnabled)) return false; // DMARead/DMAWrite return 0 at once.
-    if (!(toMemory ? dmaRxActive_ : dmaTxActive_)) return true;       // This access starts the timeline.
+    const uint64_t from = TransferPossibleFrom(toMemory);
+    if (from == 0) return true;
+    if (from == UINT64_MAX) return false;
+    return guestClock_.clkinTicks() >= from;
+}
+
+// A due tick is start + a positive frame time, so it is never 0. A due tick of
+// UINT64_MAX (unreachable: 2^64 CLKIN ticks) would read as never.
+uint64_t SPORT::TransferPossibleFrom(bool toMemory) const {
+    if (!guestClock_ || !transferGating_) return 0;
+    if (!(toMemory ? receiveEnabled : transmitEnabled)) return UINT64_MAX; // DMARead/DMAWrite return 0 at once.
+    if (!(toMemory ? dmaRxActive_ : dmaTxActive_)) return 0;              // This access starts the timeline.
     const uint64_t start = toMemory ? dmaRxStartClkin_ : dmaTxStartClkin_;
     const uint64_t delivered = toMemory ? totalRxSamplesDelivered_ : totalTxSamplesDelivered_;
     const uint64_t channels = (toMemory ? receiveStereoFrameSync : transmitStereoFrameSync) ? 2 : 1;
@@ -262,7 +271,7 @@ bool SPORT::TransferPossible(bool toMemory) const {
         const uint64_t frames = (delivered + channels - 1) / channels + 1;
         gate = {start, delivered, channels, start + SportClkinForFrames(frames, guestClock_.clkinHz, guestClock_.frameHz)};
     }
-    return guestClock_.clkinTicks() >= gate.dueClkin;
+    return gate.dueClkin;
 }
 
 SportConfig2 DecodeSportConfig2(u32 value) {

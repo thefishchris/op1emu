@@ -69,6 +69,7 @@ public:
     // words already moved is due. Before the first access after enable it is
     // true, so that access still starts the timeline. Legacy pacing: true.
     bool TransferPossible(bool toMemory) const override;
+    uint64_t TransferPossibleFrom(bool toMemory) const override;
     // Equivalence tests compare against the ungated path; default on.
     void SetTransferGating(bool enabled) { transferGating_ = enabled; }
     // Words moved since the direction was enabled.
