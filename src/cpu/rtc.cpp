@@ -125,6 +125,17 @@ bool RTC::StatUnchangedAt(std::chrono::system_clock::time_point now) {
     return StatAt(now) == lastStat;
 }
 
+std::pair<std::chrono::system_clock::time_point, std::chrono::system_clock::time_point>
+RTC::StatStableInterval(std::chrono::system_clock::time_point now) const {
+    // StatAt() packs the whole seconds of this offset (duration_cast truncates,
+    // which is floor for a non-negative offset), so it is constant exactly
+    // while the offset stays within one whole second.
+    const auto offset = (now - baseTime) + BlackfinToTime(statShadow).time_since_epoch();
+    if (offset < offset.zero()) return {now, now};
+    const auto first = now - (offset - std::chrono::floor<std::chrono::seconds>(offset));
+    return {first, first + std::chrono::seconds(1)};
+}
+
 void RTC::Tick() {
     // Handle write pending completion
     if (writePending) {

@@ -12,6 +12,7 @@
 #include "cpu/dma.h"
 #include "cpu/guest_coretimer.h"
 #include "cpu/nand.h"
+#include "cpu/rtc.h"
 #include "cpu/sport.h"
 #include "cpu/usb.h"
 #include "cec.h"
@@ -511,6 +512,27 @@ void StopPC() {
     std::printf("%-30s %llu arrivals, all returned to the caller\n", name, static_cast<unsigned long long>(arrivals));
 }
 
+// RTC::StatStableInterval: inside the interval RTC_STAT is unchanged, and it
+// changes immediately outside it (1 ms steps across several boundaries).
+std::chrono::system_clock::time_point rtcTestNow;
+std::chrono::system_clock::time_point RtcTestClock() { return rtcTestNow; }
+void RtcStableInterval() {
+    const char* name = "RTC stable interval";
+    uint64_t checked = 0;
+    for (int64_t startMs : {int64_t{1700000035123}, int64_t{1700000059999}, int64_t{1700000000000}}) {
+        RTC rtc(0xFFC00300);
+        rtcTestNow = std::chrono::system_clock::time_point(std::chrono::milliseconds(startMs));
+        rtc.SetHostClock(RtcTestClock); // lastStat = RTC_STAT at rtcTestNow
+        const auto [from, until] = rtc.StatStableInterval(rtcTestNow);
+        Check(from <= rtcTestNow && until - from == std::chrono::seconds(1), name, "interval is the whole second containing now");
+        for (auto t = from - std::chrono::milliseconds(1500); t < until + std::chrono::milliseconds(1500); t += std::chrono::milliseconds(1)) {
+            Check(rtc.StatUnchangedAt(t) == (t >= from && t < until), name, "RTC_STAT unchanged exactly within the interval");
+            ++checked;
+        }
+    }
+    std::printf("%-30s %llu host times checked\n", name, static_cast<unsigned long long>(checked));
+}
+
 void ProfileGate() {
     const char* name = "profile gate";
     {
@@ -554,7 +576,7 @@ int main(int argc, char** argv) {
     const char* only = argc > 1 ? argv[1] : nullptr;
     for (const auto& s : Scenarios())
         if (!only || std::strcmp(only, s.name) == 0) Compare(s);
-    if (!only) { StopPC(); ProfileGate(); }
+    if (!only) { StopPC(); RtcStableInterval(); ProfileGate(); }
     if (failures) return 1;
     std::puts("multiblock execution tests passed");
     return 0;

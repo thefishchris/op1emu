@@ -3,6 +3,7 @@
 #include "host_clock.h"
 #include "io.h"
 #include <chrono>
+#include <utility>
 
 class RTC : public RegisterDevice {
 public:
@@ -17,6 +18,11 @@ public:
     // Tick() recorded. Everything else ServiceIsNoOp() reads changes only by
     // MMR writes or by Tick() itself.
     bool StatUnchangedAt(std::chrono::system_clock::time_point now);
+    // The host-time interval [first, second) containing `now` in which RTC_STAT
+    // equals StatAt(now): the same whole second of the RTC time base. Empty
+    // when that base is negative. Valid until an MMR write or Tick().
+    std::pair<std::chrono::system_clock::time_point, std::chrono::system_clock::time_point>
+    StatStableInterval(std::chrono::system_clock::time_point now) const;
     // Tests only: replace the host clock (default: system_clock).
     void SetHostClock(HostClockFn clock);
 

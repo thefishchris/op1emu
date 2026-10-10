@@ -38,6 +38,7 @@
 #include <cstring>
 #include <cstdlib>
 #include <stdexcept>
+#include <tuple>
 
 // bcore CEC functions (extern "C" in bcore's src/cec.h)
 extern "C" void cec_raise(CpuState* cpu, uint32_t ivg);
@@ -871,12 +872,14 @@ uint32_t BlackFinCpu::BatchContinueBarrier(u32 ipendBefore, u32 ilatBefore, uint
     if (batchLength_ == 0) {
         // First skip in this Run(): the full per-device proof.
         if (!AllDevicesServiceNoOp(now)) return BarrierDeviceWork;
+        std::tie(rtcStableFrom_, rtcStableUntil_) = rtc_->StatStableInterval(now);
     } else {
         // Later skips: since the full proof, only MMR writes (ended the batch
         // above), the pass itself (not run), guest time (DMA/SPORT due), host
         // threads (USB host requests) and host time (RTC) can change a device
         // answer. Re-check exactly those.
-        if (!dma->ServiceIsNoOp() || static_cast<const USB&>(*usb).HostWorkPending() || !rtc_->StatUnchangedAt(now))
+        if (!dma->ServiceIsNoOp() || static_cast<const USB&>(*usb).HostWorkPending() ||
+            now < rtcStableFrom_ || now >= rtcStableUntil_)
             return BarrierDeviceWork;
         if (multiBlockCrossCheck_) {
             ++multiBlockStats_.crossChecks;

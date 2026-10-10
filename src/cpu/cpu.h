@@ -275,6 +275,9 @@ protected:
     uint64_t batchLength_ = 0;                  // blocks completed in this Run()
     bool batchHostTimeValid_ = false;           // batchHostTime_ is the next block's host time
     std::chrono::system_clock::time_point batchHostTime_;
+    // Host-time interval in which RTC_STAT keeps the value the batch's full
+    // proof saw (RTC::StatStableInterval); only MMR writes or Tick() change it.
+    std::chrono::system_clock::time_point rtcStableFrom_, rtcStableUntil_;
     std::vector<u32> batchStopPCs_;
     MultiBlockStats multiBlockStats_;
     std::function<void()> blockObserver_;
