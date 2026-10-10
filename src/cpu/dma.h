@@ -103,7 +103,22 @@ public:
 
     void ProcessWithInterrupt(int ivg) override;
 
+    // Channels that can make progress: enabled and running (bit n = channel n).
+    // Any other channel's ProcessTransfer() returns 0 without side effects, so
+    // the per-block pass skips it. Equivalence tests turn the skip off.
+    uint16_t ActiveChannels() const { return activeChannels; }
+    void SetActiveChannelTracking(bool enabled) { activeTracking = enabled; }
+
 protected:
+    // A channel's enabled/running state changes only through its registers
+    // (DMA::Write32, including the CONFIG write callback) or inside its
+    // ProcessTransfer() (completion, descriptor fetch). Each such path
+    // refreshes the bits.
+    void RefreshActive(size_t channel);
+    void RefreshAllActive();
+    uint16_t activeChannels = 0;
+    bool activeTracking = true;
+
     bool ServiceFinite2DMDMACompletion();
     Emulator& emulator;
     std::array<std::shared_ptr<DMAChannel>, 16> channels;

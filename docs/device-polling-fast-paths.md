@@ -100,3 +100,51 @@ The per-pass raise de-duplication added earlier is superseded by the
 level-sensitive model in `docs/sic-interrupt-delivery.md`. Unchanged levels
 are no longer forwarded at all, and an edge becomes one latch request in a
 mask rather than a queued event.
+
+## DMA active channels (`DMA::ProcessWithInterrupt`)
+
+The per-block DMA pass used to call `DMAChannel::ProcessTransfer()` on all 16
+channels. A channel that is not both enabled (`DMAEN`) and running returns 0
+there at once, without side effects. Those two flags change only:
+- through the channel's registers, i.e. `DMA::Write32`, including the
+  `CONFIG` write callback that sets `running = enabled` and fetches the
+  first descriptor; or
+- inside its own `ProcessTransfer()`: completion, or the next descriptor,
+  whose fetch writes the channel's registers, `CONFIG` included.
+
+Peripheral readiness (SPORT frames due, NFC data) never changes them; it only
+changes how much a transfer moves. `DMA::activeChannels` (bit n = channel n)
+mirrors `enabled && running`. It is refreshed:
+- for a channel after every `DMA::Write32` to it;
+- after each of the channel's per-block `ProcessTransfer()`;
+- for all channels after the idle/peripheral service helpers that call
+  `ProcessTransfer()` directly.
+
+The pass visits the same channels in the same ascending order and skips only
+channels outside the set. A stale set bit only costs a no-op call. A missed
+activation could come only from a register write, and that path is refreshed.
+
+### Evidence
+
+`tests/dma_active_channel_tests.cpp` runs the same deterministic workload with
+and without tracking, and compares a hash of every channel register, SIC/CEC
+state, SPORT word count and PC after each of 400,000 blocks, plus the
+destination buffers. The workload covers:
+- SPORT TX on a two-descriptor large-model list (firmware `CONFIG=0x7489`),
+  disabled and re-enabled mid-run;
+- SPORT RX autobuffer with interrupts;
+- MDMA0 1D, started and later re-run at 32-bit;
+- MDMA1 2D.
+
+All states are identical. Removing the refresh on register writes makes the
+test fail.
+
+v241 functional A/B (same binary, tracking switched off/on), per guest second:
+- **`ProcessTransfer` calls:** 1.09 billion → 60,000 in boot; 292–386M →
+  40–59M in the SPORT-active phases.
+- **Throughput:** blocks per host second +6.8–9.8%.
+- **Behaviour:** SPORT, DMA, IRQ28 and core timer cadences unchanged; the UI
+  works.
+
+NAND/NFC DMA is covered by the firmware boot itself, which reads its
+filesystem through it.

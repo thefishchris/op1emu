@@ -356,6 +356,7 @@ void DMA::Write32(u32 offset, u32 value) {
     size_t channelIndex = offset / 0x40;
     if (channelIndex < channels.size()) {
         channels[channelIndex]->Write32(offset % 0x40, value);
+        RefreshActive(channelIndex);
         if ((channelIndex == 12 || channelIndex == 13) && offset % 0x40 == 0x08)
             ServiceFinite2DMDMACompletion();
     }
@@ -376,10 +377,25 @@ u32 DMA::Read32(u32 offset) {
 // FLOW=Autobuffer auto-restarting the transfer indefinitely.
 static constexpr u32 MDMA_BURST_BYTES = 4096;
 
+void DMA::RefreshActive(size_t channel) {
+    const uint16_t bit = static_cast<uint16_t>(1u << channel);
+    if (channels[channel]->IsEnabled() && channels[channel]->IsRunning()) activeChannels |= bit;
+    else activeChannels &= static_cast<uint16_t>(~bit);
+}
+
+void DMA::RefreshAllActive() {
+    for (size_t i = 0; i < channels.size(); i++) RefreshActive(i);
+}
+
 void DMA::ProcessWithInterrupt(int ivg) {
-    for (auto& channel : channels) {
+    // Same channels, same order as a full scan: only channels that cannot
+    // make progress are skipped.
+    for (size_t i = 0; i < channels.size(); i++) {
+        if (activeTracking && !(activeChannels & (1u << i))) continue;
+        auto& channel = channels[i];
         if (!channel->IsMDMA()) {
             channel->ProcessTransfer();
+            RefreshActive(i);
             continue;
         }
         u32 total = 0;
@@ -388,6 +404,7 @@ void DMA::ProcessWithInterrupt(int ivg) {
             if (!moved) break;
             total += moved;
         }
+        RefreshActive(i);
     }
 }
 
@@ -409,6 +426,7 @@ uint64_t DMA::ServicePeripheral(DMAPeripheralType type) {
         if (channel->IsMDMA() || channel->GetPeripheralType() != type) continue;
         while (const u32 moved = channel->ProcessTransfer()) total += moved;
     }
+    RefreshAllActive();
     return total;
 }
 
@@ -417,6 +435,7 @@ bool DMA::ServiceIdleNFCReadCompletion() {
     auto& channel = channels[NFC_DMA_CHANNEL];
     if (!channel->IsIdleNFCRead()) return false;
     channel->ProcessTransfer();
+    RefreshActive(NFC_DMA_CHANNEL);
     return channel->IsCompleted();
 }
 
@@ -428,8 +447,9 @@ bool DMA::ServiceIdleMDMACompletion() {
 
         while (source->IsRunning() || destination->IsRunning()) {
             const u32 moved = source->ProcessTransfer() + destination->ProcessTransfer();
-            if (!moved) return false;
+            if (!moved) { RefreshAllActive(); return false; }
         }
+        RefreshAllActive();
         return destination->IsCompleted();
     }
     return false;
