@@ -281,6 +281,12 @@ void GPTimer::BindInterrupt(int id, int q, InterruptHandler callback) {
     timers[id]->BindInterrupt(q, callback);
 }
 
+bool GPTimer::TicksAreNoOp() const {
+    for (const auto& timer : timers)
+        if (timer->isRunning()) return false;
+    return true;
+}
+
 void GPTimer::Tick(GPTimerClockType clockType) {
     for (auto& timer : timers) {
         timer->Tick(clockType);

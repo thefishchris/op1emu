@@ -7,6 +7,8 @@
 class Display;
 class PPI : public RegisterDevice, public DMABus {
 public:
+    // ProcessWithInterrupt() is the inherited no-op, so skipping it changes nothing.
+    bool ServiceIsNoOp() override { return true; }
     PPI(u32 baseAddr);
 
     // Only support Output mode

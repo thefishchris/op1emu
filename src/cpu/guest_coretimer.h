@@ -33,6 +33,8 @@ class GuestClock;
 //  - several expiries between two syncs raise IVTMR once (CEC ILAT latch).
 class GuestCoreTimer : public RegisterDevice {
 public:
+    // ProcessWithInterrupt() is the inherited no-op, so skipping it changes nothing.
+    bool ServiceIsNoOp() override { return true; }
     GuestCoreTimer(u32 baseAddr, const GuestClock& clock);
 
     // CPU loop only, after each guest-clock advance. Processes expiries up to

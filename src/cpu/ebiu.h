@@ -4,6 +4,8 @@
 
 class EBIU : public RegisterDevice {
 public:
+    // ProcessWithInterrupt() is the inherited no-op, so skipping it changes nothing.
+    bool ServiceIsNoOp() override { return true; }
     EBIU(u32 baseAddr);
 
 private:

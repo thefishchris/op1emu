@@ -42,6 +42,8 @@ uint64_t SportClkinForFrames(uint64_t frames, uint64_t clkinHz, uint64_t frameHz
 
 class SPORT : public RegisterDevice, public DMABus {
 public:
+    // ProcessWithInterrupt() is the inherited no-op, so skipping it changes nothing.
+    bool ServiceIsNoOp() override { return true; }
     using AudioOutputCallback = std::function<void(const void* data, size_t samples, int channels, int bitsPerSample)>;
     using AudioInputCallback = std::function<size_t(void* data, size_t samples, int channels, int bitsPerSample)>;
 

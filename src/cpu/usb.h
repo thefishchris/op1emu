@@ -105,6 +105,11 @@ public:
     void HandleDataRead(int ep, int interval, std::size_t limit, ReplyCallback callback) override;
 
     void ProcessWithInterrupt(int ivg) override;
+    // A poll is a no-op when USB is disabled, or when it would take the
+    // inactive fast path: that only re-drives the three lines with the levels
+    // already driven, which the level-sensitive SIC ignores. Host requests set
+    // workPending under the mutex, so a pending host request is never idle.
+    bool ServiceIsNoOp() override;
 
     // Per-block polling counters (CPU thread). `calls` counts polls while
     // GLOBAL_ENA is set; `fastPath` of them skipped the endpoint walk.
@@ -112,6 +117,12 @@ public:
     PollStats Stats() {
         std::lock_guard<std::mutex> lock(mutex);
         return pollStats;
+    }
+    // Host requests completed (callbacks delivered to the host side); part of
+    // the observable state for multi-block verification.
+    uint64_t HostCompletions() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return hostCompletions;
     }
     // Equivalence tests compare against the always-walk path; default on.
     void SetInactiveFastPath(bool allowed) {
@@ -192,4 +203,5 @@ protected:
     bool lineLevels[3] = {false, false, false};
     bool lineLevelsValid = false;
     PollStats pollStats;
+    uint64_t hostCompletions = 0;
 };

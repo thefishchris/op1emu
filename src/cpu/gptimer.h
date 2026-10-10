@@ -14,6 +14,11 @@ enum GPTimerClockType {
 
 class GPTimer : public RegisterDevice {
 public:
+    // ProcessWithInterrupt() is the inherited no-op, so skipping it changes nothing.
+    bool ServiceIsNoOp() override { return true; }
+    // The CPU loop also calls Tick() on host-time pacing; that is a no-op
+    // while no timer is running (GPTimerImpl::Tick returns at once).
+    bool TicksAreNoOp() const;
     GPTimer(u32 baseAddr);
     ~GPTimer();
 

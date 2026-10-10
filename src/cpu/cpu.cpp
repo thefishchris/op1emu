@@ -34,6 +34,7 @@
 #include "cpu_state.h"
 #include "shadow_timing.h"
 #include "mmr.h"
+#include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <stdexcept>
@@ -44,6 +45,7 @@ extern "C" void cec_check_pending(CpuState* cpu);
 
 // bcore EVT init (extern in bcore's src/evt.h)
 void evt_init();
+uint32_t evt_get(uint32_t ivg); // bcore src/evt.h
 
 static constexpr int IVG_IVTMR = 6;
 
@@ -75,6 +77,8 @@ static constexpr int IRQ_GPTIMER_0 = 32;
 // Only one BlackFinCpu instance may exist per process.
 class BcoreCECDevice : public Device {
 public:
+    // ProcessWithInterrupt() is the inherited no-op, so skipping it changes nothing.
+    bool ServiceIsNoOp() override { return true; }
     BcoreCECDevice(CpuState* cpu)
         : Device("CEC", CEC_MMR_BASE, CEC_MMR_SIZE), cpu_(cpu) {}
     void Read(u32 offset, void* buffer, u32 length) override {
@@ -99,6 +103,8 @@ private:
 // Thin EVT device shim for the same reason.
 class BcoreEVTDevice : public Device {
 public:
+    // ProcessWithInterrupt() is the inherited no-op, so skipping it changes nothing.
+    bool ServiceIsNoOp() override { return true; }
     BcoreEVTDevice()
         : Device("EVT", EVT_BASE, EVT_SIZE) {}
     void Read(u32 offset, void* buffer, u32 length) override {
@@ -124,6 +130,7 @@ BlackFinCpu::BlackFinCpu() : pc(0) {
     // All timing assumptions are selected and validated in one place
     // (src/cpu/timing_profile.cpp, docs/emulator-profiles.md).
     timing_ = ResolveTimingConfigFromEnvironment();
+    if (const char* trace = std::getenv("OP1EMU_TRACE_CPU")) perBlockTracing_ = std::strcmp(trace, "1") == 0;
     LogInfo("Emulator profile=%s assumptions=%zu", EmulatorProfileName(timing_.profile), timing_.assumptions.size());
     for (const auto& assumption : timing_.assumptions) LogInfo("  timing assumption: %s", assumption.c_str());
     if (timing_.shadowTiming) {
@@ -353,6 +360,13 @@ BlackFinCpu::BlackFinCpu() : pc(0) {
     cpuState_->syscfg = 0x30;
 
     startTime = std::chrono::system_clock::now();
+    // M0 multi-block diagnostics (docs/multiblock-execution.md): off unless requested.
+    if (const char* diag = std::getenv("OP1EMU_BATCH_DIAG")) {
+        const bool verify = std::strcmp(diag, "verify") == 0;
+        if (!verify && std::strcmp(diag, "1") != 0) throw std::invalid_argument("OP1EMU_BATCH_DIAG must be 1 or verify");
+        SetBatchDiagnostics(true, verify);
+        LogInfo("Batch diagnostics enabled%s (passive: service passes are not skipped)", verify ? " with verification" : "");
+    }
 }
 
 BlackFinCpu::~BlackFinCpu() {
@@ -425,6 +439,13 @@ HaltReason BlackFinCpu::Run() {
     const uint64_t guestShadowBefore =
         guestCostModel_ == GuestCostModel::ShadowEstimate && shadowTiming_ ? shadowTiming_->EstimatedCycles() : 0;
     const u32 ipendBeforeBlock = cec_mmr_read(cpuState_.get(), CEC_MMR_BASE + 8);
+    u32 ilatBeforeBlock = 0;
+    uint64_t mmioBeforeBlock = 0, expiriesBeforeBlock = 0;
+    if (batchDiagnostics_) {
+        ilatBeforeBlock = cec_mmr_read(cpuState_.get(), CEC_MMR_BASE + 12);
+        mmioBeforeBlock = bcoreMemory_->MMIOAccessCount();
+        expiriesBeforeBlock = guestCoreTimer_ ? guestCoreTimer_->Expiries() : 0;
+    }
     if (!ExecuteCoreBlock(cpuState_->pc)) {
         LogError("JIT execution failed at PC %08X", cpuState_->pc);
         failed_.store(true, std::memory_order_release);
@@ -464,6 +485,10 @@ HaltReason BlackFinCpu::Run() {
         // After did_jump is cleared: cec_raise drops a latch while it is set.
         guestCoreTimer_->Sync();
     }
+    // M0 diagnostics: would skipping the service pass below have been harmless?
+    const bool verifyPass =
+        batchDiagnostics_ && DiagnoseBatchBlock(ipendBeforeBlock, ilatBeforeBlock, mmioBeforeBlock, expiriesBeforeBlock,
+                                                cyclesElapsed % 10000 == 0);
     if (cpuState_->idle) {
         // Functional IDLE recurs at timer rate: collapse the log (first 64, then powers of two).
         const uint64_t entries = cpuState_->idle_entries;
@@ -493,6 +518,7 @@ HaltReason BlackFinCpu::Run() {
 
     ProcessEvents();
     RepeatAssertedAfterReturn(ipendBeforeBlock);
+    if (verifyPass) VerifyBatchPass();
     return HaltReason::Break;
 }
 
@@ -698,6 +724,178 @@ uint64_t BlackFinCpu::ServiceSportDma() {
     uint64_t bytes = 0;
     for (const DMAPeripheralType type : kSportDmaTypes) bytes += dma->ServicePeripheral(type);
     return bytes;
+}
+
+void BlackFinCpu::SetBatchDiagnostics(bool enabled, bool verify) {
+    batchDiagnostics_ = enabled;
+    batchVerify_ = enabled && verify;
+    batchStats_ = BatchDiagnostics{};
+    batchStats_.deviceWork.assign(devices.size() + 1, 0);
+    dma->SetWriteTracking(batchVerify_);
+}
+
+std::string BlackFinCpu::DeviceName(size_t index) const {
+    if (index < devices.size()) return devices[index]->Name();
+    return "GPTimer-ticks";
+}
+
+bool BlackFinCpu::DiagnoseBatchBlock(u32 ipendBefore, u32 ilatBefore, uint64_t mmioBefore, uint64_t expiriesBefore,
+                                     bool gpTimerTickDue) {
+    lastBatchBarriers_ = EvaluateBatchBarriers(ipendBefore, ilatBefore, mmioBefore, expiriesBefore, gpTimerTickDue);
+    ++batchStats_.blocks;
+    for (unsigned i = 0; i < kBatchBarrierCount; ++i)
+        if (lastBatchBarriers_ & (1u << i)) ++batchStats_.barriers[i];
+    bool verify = false;
+    if (!lastBatchBarriers_) {
+        ++batchStats_.eligible;
+        if (batchVerify_) { batchPassBefore_ = CaptureBlockState(); verify = true; }
+    }
+    if ((batchStats_.blocks & ((uint64_t{1} << 24) - 1)) == 0) {
+        std::string work;
+        for (size_t i = 0; i < batchStats_.deviceWork.size(); ++i)
+            if (batchStats_.deviceWork[i]) work += " " + DeviceName(i) + "=" + std::to_string(batchStats_.deviceWork[i]);
+        LogInfo("batch-diag blocks=%llu eligible=%llu mmio=%llu irq-change=%llu irq-pending=%llu idle=%llu deadline=%llu "
+                "pll=%llu device-work=%llu queued=%llu tracing=%llu verified=%llu mismatches=%llu devices:%s",
+                (unsigned long long)batchStats_.blocks, (unsigned long long)batchStats_.eligible,
+                (unsigned long long)batchStats_.barriers[0], (unsigned long long)batchStats_.barriers[1],
+                (unsigned long long)batchStats_.barriers[2], (unsigned long long)batchStats_.barriers[3],
+                (unsigned long long)batchStats_.barriers[4], (unsigned long long)batchStats_.barriers[5],
+                (unsigned long long)batchStats_.barriers[6], (unsigned long long)batchStats_.barriers[7],
+                (unsigned long long)batchStats_.barriers[8], (unsigned long long)batchStats_.verified,
+                (unsigned long long)batchStats_.mismatches, work.c_str());
+    }
+    return verify;
+}
+
+// The pass was predicted to be a no-op: it must not have changed anything.
+void BlackFinCpu::VerifyBatchPass() {
+    ++batchStats_.verified;
+    const std::string diff = DiffBlockState(batchPassBefore_, CaptureBlockState());
+    if (!diff.empty() && batchStats_.mismatches++ == 0) {
+        batchStats_.firstMismatch = diff;
+        LogWarn("batch-diag predicted no-op service pass changed state at pc=%08X: %s", cpuState_->pc, diff.c_str());
+    }
+}
+
+void BlackFinCpu::SetMMIOLog(std::vector<MMIOAccess>* log) { bcoreMemory_->SetMMIOLog(log); }
+
+// Conditions under which the service pass after this block could not be
+// skipped (docs/multiblock-execution.md). Passive: called only with
+// diagnostics enabled, and reads state without side effects.
+uint32_t BlackFinCpu::EvaluateBatchBarriers(u32 ipendBefore, u32 ilatBefore, uint64_t mmioBefore, uint64_t expiriesBefore,
+                                            bool gpTimerTickDue) {
+    uint32_t barriers = 0;
+    CpuState* state = cpuState_.get();
+    const u32 imask = cec_mmr_read(state, CEC_MMR_BASE + 4);
+    const u32 ipend = cec_mmr_read(state, CEC_MMR_BASE + 8);
+    const u32 ilat = cec_mmr_read(state, CEC_MMR_BASE + 12);
+    if (bcoreMemory_->MMIOAccessCount() != mmioBefore) barriers |= BarrierMmio;
+    if (ipend != ipendBefore || ilat != ilatBefore) barriers |= BarrierInterruptChange;
+    if (ilat & imask) barriers |= BarrierInterruptPending;
+    if (state->idle) barriers |= BarrierIdle;
+    if (guestCoreTimer_ && guestCoreTimer_->Expiries() != expiriesBefore) barriers |= BarrierGuestDeadline;
+    if (pll_->NextDeadlineTicks()) barriers |= BarrierPllCountdown;
+    bool work = false;
+    for (size_t i = 0; i < devices.size(); ++i) {
+        if (devices[i]->ServiceIsNoOp()) continue;
+        work = true;
+        ++batchStats_.deviceWork[i];
+    }
+    // The pass ticks the GP timers only on its host-time sample (TEMPORARY, see Run()).
+    if (gpTimerTickDue && !gptimer->TicksAreNoOp()) { work = true; ++batchStats_.deviceWork.back(); }
+    if (work) barriers |= BarrierDeviceWork;
+    {
+        std::unique_lock<std::recursive_mutex> lock(eventQueueMutex);
+        if (!eventQueue.empty() || requestedRaises_) barriers |= BarrierQueuedEvents;
+    }
+    if (perBlockTracing_) barriers |= BarrierTracing;
+    return barriers;
+}
+
+BlackFinCpu::BlockState BlackFinCpu::CaptureBlockState() {
+    BlockState out;
+    out.reserve(320);
+    auto add = [&out](std::string name, uint64_t value) { out.emplace_back(std::move(name), value); };
+    const CpuState& c = *cpuState_;
+    for (int i = 0; i < 16; ++i) add("r" + std::to_string(i), c.dpregs[i]);
+    for (int i = 0; i < 2; ++i) { add("ax" + std::to_string(i), c.ax[i]); add("aw" + std::to_string(i), c.aw[i]); }
+    for (int i = 0; i < 4; ++i) {
+        add("i" + std::to_string(i), c.iregs[i]); add("m" + std::to_string(i), c.mregs[i]);
+        add("b" + std::to_string(i), c.bregs[i]); add("l" + std::to_string(i), c.lregs[i]);
+    }
+    for (int i = 0; i < 2; ++i) {
+        add("lt" + std::to_string(i), c.lt[i]); add("lc" + std::to_string(i), c.lc[i]); add("lb" + std::to_string(i), c.lb[i]);
+    }
+    add("rets", c.rets); add("reti", c.reti); add("retx", c.retx); add("retn", c.retn); add("rete", c.rete);
+    add("pc", c.pc); add("usp", c.usp); add("ksp", c.ksp); add("seqstat", c.seqstat); add("syscfg", c.syscfg);
+    const uint32_t astat[] = {c.az, c.an, c.ac0, c.ac0_copy, c.ac1, c.v, c.v_copy, c.vs, c.av0, c.av0s, c.av1, c.av1s, c.cc, c.aq, c.rnd_mod};
+    for (size_t i = 0; i < sizeof(astat) / sizeof(astat[0]); ++i) add("astat" + std::to_string(i), astat[i]);
+    add("idle", c.idle); add("halted", c.halted); add("idle_pc", c.idle_pc); add("idle_entries", c.idle_entries);
+    add("packet_entries", c.packet_entries);
+    add("cec.imask", cec_mmr_read(cpuState_.get(), CEC_MMR_BASE + 4));
+    add("cec.ipend", cec_mmr_read(cpuState_.get(), CEC_MMR_BASE + 8));
+    add("cec.ilat", cec_mmr_read(cpuState_.get(), CEC_MMR_BASE + 12));
+    for (uint32_t v = 0; v < 16; ++v) add("evt" + std::to_string(v), evt_get(v));
+    auto mmr = [&](const char* dev, u32 base, std::initializer_list<u32> offsets) {
+        for (u32 off : offsets) {
+            char name[48];
+            std::snprintf(name, sizeof(name), "%s+%03X", dev, off);
+            add(name, emulator.MemoryRead32(base + off));
+        }
+    };
+    mmr("sic", 0xFFC00100, {0x0C, 0x10, 0x14, 0x18, 0x1C, 0x20, 0x24, 0x4C, 0x50, 0x54, 0x58, 0x5C, 0x60, 0x64});
+    uint64_t lines = 0;
+    for (int v = 0; v < 32; ++v) if (sic->LineAsserted(v)) lines |= uint64_t{1} << v;
+    add("sic.lines", lines);
+    for (u32 ch = 0; ch < 16; ++ch) {
+        char dev[16];
+        std::snprintf(dev, sizeof(dev), "dma%u", ch);
+        mmr(dev, 0xFFC00C00 + ch * 0x40, {0x00, 0x04, 0x08, 0x10, 0x14, 0x18, 0x1C, 0x20, 0x24, 0x28, 0x2C, 0x30, 0x38});
+    }
+    add("dma.written_bytes", dma->WrittenBytes());
+    add("dma.write_hash", dma->WriteHash());
+    for (int n = 0; n < 2; ++n) {
+        SPORT& sp = n ? *sport1 : *sport0;
+        mmr(n ? "sport1" : "sport0", n ? 0xFFC00900 : 0xFFC00800, {0x00, 0x04, 0x20, 0x24});
+        add(n ? "sport1.tx_words" : "sport0.tx_words", sp.TransmitWords());
+        add(n ? "sport1.rx_words" : "sport0.rx_words", sp.ReceiveWords());
+    }
+    add("clock.clkin", guestClock_.ClkinTicks()); add("clock.cclk", guestClock_.CclkCycles());
+    add("clock.sclk", guestClock_.SclkCycles()); add("clock.cclk_without_ratio", guestClock_.CclkWithoutRatio());
+    add("clock.alignments", guestClock_.RatioAlignments());
+    if (guestCoreTimer_) {
+        mmr("coretimer", 0xFFE03000, {0x00, 0x04, 0x08, 0x0C});
+        add("coretimer.expiries", guestCoreTimer_->Expiries());
+    }
+    mmr("pll", 0xFFC00000, {0x00, 0x04, 0x08, 0x0C, 0x10});
+    add("pll.deadline", pll_->NextDeadlineTicks().value_or(UINT64_MAX));
+    mmr("gptimer", 0xFFC00600, {0x00, 0x04, 0x08, 0x0C, 0x10, 0x14, 0x18, 0x1C, 0x20, 0x24, 0x28, 0x2C, 0x30, 0x34, 0x38,
+                                0x3C, 0x40, 0x44, 0x48, 0x4C, 0x50, 0x54, 0x58, 0x5C, 0x60, 0x64, 0x68, 0x6C, 0x70, 0x74,
+                                0x78, 0x7C, 0x80, 0x88});
+    mmr("nfc", 0xFFC03700, {0x04, 0x08, 0x0C, 0x10, 0x14, 0x18, 0x1C});
+    mmr("rtc", 0xFFC00300, {0x04, 0x08, 0x0C, 0x10, 0x14}); // RTC_STAT is host time: excluded
+    mmr("usb", 0xFFC03800, {0x00, 0x04, 0x08, 0x0C, 0x10, 0x14, 0x18, 0x1C, 0x2C, 0x30});
+    add("usb.host_completions", usb ? static_cast<USB&>(*usb).HostCompletions() : 0);
+    {
+        std::unique_lock<std::recursive_mutex> lock(eventQueueMutex);
+        add("events.queued", eventQueue.size());
+        add("sic.latch_requests", requestedRaises_);
+    }
+    return out;
+}
+
+std::string BlackFinCpu::DiffBlockState(const BlockState& a, const BlockState& b) {
+    if (a.size() != b.size()) return "state layout differs";
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (a[i].first != b[i].first) return "state layout differs at " + a[i].first;
+        if (a[i].second != b[i].second) {
+            char text[160];
+            std::snprintf(text, sizeof(text), "%s: %llX -> %llX", a[i].first.c_str(),
+                          static_cast<unsigned long long>(a[i].second), static_cast<unsigned long long>(b[i].second));
+            return text;
+        }
+    }
+    return {};
 }
 
 void BlackFinCpu::ReportHeldDomainIdle() {

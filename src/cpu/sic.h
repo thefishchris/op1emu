@@ -6,6 +6,8 @@
 
 class SIC : public RegisterDevice {
 public:
+    // ProcessWithInterrupt() is the inherited no-op, so skipping it changes nothing.
+    bool ServiceIsNoOp() override { return true; }
     SIC(u32 baseAddr);
 
     // Level-sensitive model (docs/sic-interrupt-delivery.md). Peripheral

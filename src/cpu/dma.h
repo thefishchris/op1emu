@@ -107,7 +107,24 @@ public:
     // Any other channel's ProcessTransfer() returns 0 without side effects, so
     // the per-block pass skips it. Equivalence tests turn the skip off.
     uint16_t ActiveChannels() const { return activeChannels; }
+    // The per-block pass is a no-op when every active channel would return at
+    // the TransferPossible() gate: a peripheral channel with a non-zero
+    // CURR_X_COUNT whose bus reports that nothing can move now (a guest-paced
+    // SPORT before its next frame). MDMA and any other active channel are not
+    // idle.
+    bool ServiceIsNoOp() override;
     void SetActiveChannelTracking(bool enabled) { activeTracking = enabled; }
+    // Memory written by peripheral-to-memory transfers (state comparison):
+    // a byte count, and with tracking on an FNV-1a hash of address and data.
+    void SetWriteTracking(bool enabled) { writeTracking = enabled; }
+    uint64_t WrittenBytes() const { return writtenBytes; }
+    uint64_t WriteHash() const { return writeHash; }
+    void NoteMemoryWrite(u32 address, const u8* data, u32 length) {
+        writtenBytes += length;
+        if (!writeTracking) return;
+        for (int i = 0; i < 4; ++i) writeHash = (writeHash ^ ((address >> (8 * i)) & 0xFFu)) * 1099511628211ull;
+        for (u32 i = 0; i < length; ++i) writeHash = (writeHash ^ data[i]) * 1099511628211ull;
+    }
 
 protected:
     // A channel's enabled/running state changes only through its registers
@@ -118,6 +135,9 @@ protected:
     void RefreshAllActive();
     uint16_t activeChannels = 0;
     bool activeTracking = true;
+    bool writeTracking = false;
+    uint64_t writtenBytes = 0;
+    uint64_t writeHash = 1469598103934665603ull;
 
     bool ServiceFinite2DMDMACompletion();
     Emulator& emulator;

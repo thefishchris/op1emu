@@ -42,6 +42,12 @@ public:
     void TriggerInterrupt(int level) const { if (interruptHandlers.size()) interruptHandlers.begin()->second(interruptHandlers.begin()->first, level); }
 
     virtual void ProcessWithInterrupt(int ivg) {}
+    // Multi-block execution eligibility (docs/multiblock-execution.md): true
+    // only when calling ProcessWithInterrupt() now is proven to change nothing
+    // guest-visible (registers, interrupt lines, memory, queued events). The
+    // default is false: a device is never assumed idle. Diagnostic only; it
+    // does not change when devices are serviced.
+    virtual bool ServiceIsNoOp() { return false; }
 
 protected:
     std::string name;
@@ -52,6 +58,8 @@ protected:
 
 class MemoryDevice : public Device {
 public:
+    // ProcessWithInterrupt() is the inherited no-op, so skipping it changes nothing.
+    bool ServiceIsNoOp() override { return true; }
     MemoryDevice(const std::string& name, u32 baseAddr, u32 size);
     ~MemoryDevice() override;
     void BindFastMem(const std::shared_ptr<FastMem>& fastmem) override;

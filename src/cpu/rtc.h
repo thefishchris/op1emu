@@ -9,9 +9,12 @@ public:
 
     void Tick();  // Called periodically to update RTC state
     void ProcessWithInterrupt(int ivg) override;
+    bool ServiceIsNoOp() override;
 
 private:
     void UpdateInterrupts();
+    int InterruptLevel();
+    int drivenLevel = -1; // Last level driven by UpdateInterrupts(); -1 before the first.
     u32 GetCurrentStat();
 
     bool stopwatchIntEnabled = false;

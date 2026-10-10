@@ -90,14 +90,23 @@ u32 RTC::GetCurrentStat() {
     return TimeToBlackfin(now - baseTime + BlackfinToTime(statShadow));
 }
 
-void RTC::UpdateInterrupts() {
+int RTC::InterruptLevel() {
     u32 ictl = Read32(0x04);
     u32 istat = Read32(0x08);
-    if (ictl & istat != 0) {
-        TriggerInterrupt(1);
-    } else {
-        TriggerInterrupt(0);
-    }
+    return (ictl & istat != 0) ? 1 : 0; // Existing expression, unchanged.
+}
+
+void RTC::UpdateInterrupts() {
+    drivenLevel = InterruptLevel();
+    TriggerInterrupt(drivenLevel);
+}
+
+// Tick() changes nothing when no write is pending, the host-time RTC_STAT
+// still equals lastStat (so no second has elapsed and lastStat is rewritten
+// with the same value) and the interrupt level it would drive is the level
+// already driven.
+bool RTC::ServiceIsNoOp() {
+    return !writePending && GetCurrentStat() == lastStat && drivenLevel == InterruptLevel();
 }
 
 void RTC::Tick() {

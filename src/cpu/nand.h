@@ -20,6 +20,9 @@ public:
     virtual bool IsBusy() const = 0;
     virtual bool CompletePendingReset() { return false; }
     virtual bool CompletePendingPageRead() { return false; }
+    // True if CompletePendingReset() or CompletePendingPageRead() would act.
+    // Conservative default: unknown models always report pending work.
+    virtual bool HasPendingCompletion() const { return true; }
 
     virtual void StartPageRead() = 0;
     virtual void StartPageWrite() = 0;
@@ -42,6 +45,7 @@ public:
     u32 DMAWrite(int x, int y, const void* source, u32 length) override;
 
     void ProcessWithInterrupt(int ivg) override;
+    bool ServiceIsNoOp() override;
     bool ServiceIdleCompletion();
     bool PageReadDMAReady() const;
 
@@ -50,6 +54,8 @@ protected:
     void ResetECC();
     void CalculateECC(const u8* data, u32 length);
     void UpdateInterrupts();
+    int InterruptLevel();
+    int drivenLevel = -1; // Last level driven by UpdateInterrupts(); -1 before the first.
 
     void SetNotBusy(bool value);
     void SetWriteBufferEmpty(bool value);

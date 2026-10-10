@@ -5,6 +5,9 @@
 
 // op1emu headers
 #include "emu.h"
+#include "mmio_access.h"
+#include <array>
+#include <vector>
 struct CpuState;
 
 class EmulatorMemory : public Memory {
@@ -28,6 +31,11 @@ public:
     uint32_t rawmem_limit() const override { return 0; }
     void DumpRecentMMIO() const;
 
+    // Guest accesses to memory-mapped registers (0xFFC00000 and up): a running
+    // count, and an optional exact log for state comparison (nullptr = off).
+    uint64_t MMIOAccessCount() const { return mmioCount_; }
+    void SetMMIOLog(std::vector<MMIOAccess>* log) { mmioLog_ = log; }
+
 private:
     Emulator& emulator_;
     void ObserveClock(uint32_t address, uint32_t value, unsigned width) const;
@@ -39,4 +47,6 @@ private:
     mutable unsigned recentCount_ = 0;
     mutable unsigned recentIndex_ = 0;
     void RecordMMIO(uint32_t address, uint32_t value, unsigned width, bool write) const;
+    mutable uint64_t mmioCount_ = 0;
+    std::vector<MMIOAccess>* mmioLog_ = nullptr;
 };

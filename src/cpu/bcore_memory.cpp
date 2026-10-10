@@ -71,6 +71,10 @@ const uint8_t* EmulatorMemory::raw() const {
 }
 
 void EmulatorMemory::RecordMMIO(uint32_t address, uint32_t value, unsigned width, bool write) const {
+    if (address >= 0xFFC00000u) {
+        ++mmioCount_;
+        if (mmioLog_) mmioLog_->push_back({cpu_ ? cpu_->pc : 0, address, value, width, write});
+    }
     if (address < 0xFFC00000 || address >= 0xFFE00000) return;
     recentMMIO_[recentIndex_] = {cpu_ ? cpu_->pc : 0, address, value, width, write};
     recentIndex_ = (recentIndex_ + 1) % 32;

@@ -104,6 +104,8 @@ protected:
 
 class GPIO : public RegisterDevice, public GPIOPeripheral {
 public:
+    // ProcessWithInterrupt() is the inherited no-op, so skipping it changes nothing.
+    bool ServiceIsNoOp() override { return true; }
     GPIO(const std::string& name, u32 baseAddr);
 
     void BindInterruptA(int q, InterruptHandler callback) {

@@ -57,6 +57,8 @@ public:
     }
 
     void ProcessWithInterrupt(int ivg) override;
+    // ProcessMasterTransfer() returns at once unless the TWI and its master are enabled.
+    bool ServiceIsNoOp() override { return !enabled || !masterEnable; }
 
 protected:
     void ProcessMasterTransfer();

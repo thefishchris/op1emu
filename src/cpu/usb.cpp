@@ -488,6 +488,7 @@ void USB::ProcessTransfer() {
             }
             if (ep.txCallback && ep.txBuffer.size() >= ep.txLimit) {
                 ep.txCallback(ep.txBuffer.data(), ep.txLimit);
+                ++hostCompletions;
                 ep.txBuffer.erase(ep.txBuffer.begin(), ep.txBuffer.begin() + ep.txLimit);
                 ep.txCallback = nullptr;
             }
@@ -505,6 +506,7 @@ void USB::ProcessTransfer() {
                 epRxInterrupts |= (1 << i);
             } else if (ep.rxCallback) {
                 ep.rxCallback();
+                ++hostCompletions;
                 ep.rxCallback = nullptr;
             }
         }
@@ -516,6 +518,7 @@ void USB::ProcessTransfer() {
             LogError("USB: No setup packet handler for ep0 DATAEND");
         } else {
             setupCallback(ep0.txBuffer.data(), ep0.txBuffer.size());
+            ++hostCompletions;
             ep0.txBuffer.clear();
             setupCallback = nullptr;
             ep0.dataEnded = false;
@@ -525,6 +528,12 @@ void USB::ProcessTransfer() {
     }
     UpdateInterrupts();
     workPending.store(!NoPendingWork(), std::memory_order_relaxed);
+}
+
+bool USB::ServiceIsNoOp() {
+    if (!enabled) return true;
+    std::lock_guard<std::mutex> lock(mutex);
+    return fastPathAllowed && lineLevelsValid && !workPending.load(std::memory_order_relaxed);
 }
 
 void USB::ProcessWithInterrupt(int ivg) {

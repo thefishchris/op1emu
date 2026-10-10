@@ -26,6 +26,7 @@ public:
     bool IsBusy() const override;
     bool CompletePendingReset() override;
     bool CompletePendingPageRead() override;
+    bool HasPendingCompletion() const override { return resetPending || pageReadPending; }
 
 protected:
     ReadCallback readCallback;

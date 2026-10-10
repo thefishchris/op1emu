@@ -1,12 +1,15 @@
 #pragma once
 
 #include "emu.h"
+#include "mmio_access.h"
 #include "guest_clock.h"
 #include "timing_profile.h"
 #include <atomic>
 #include <memory>
 #include <vector>
 #include <chrono>
+#include <string>
+#include <utility>
 #include <optional>
 
 // Forward declarations for bcore types (headers included in cpu.cpp only)
@@ -81,6 +84,46 @@ public:
     // Resolved execution profile and timing assumptions (fixed at construction).
     const TimingConfig& Timing() const { return timing_; }
     SPORT& Sport(int index) { return index ? *sport1 : *sport0; }
+
+    // Multi-block execution groundwork, milestone M0
+    // (docs/multiblock-execution.md). Passive: nothing here changes when or
+    // how devices are serviced. Off by default (OP1EMU_BATCH_DIAG=1 enables
+    // barrier statistics, OP1EMU_BATCH_DIAG=verify also verifies them).
+    enum BatchBarrier : uint32_t {
+        BarrierMmio = 1u << 0,              // the block accessed a memory-mapped register
+        BarrierInterruptChange = 1u << 1,   // IPEND or ILAT changed during the block
+        BarrierInterruptPending = 1u << 2,  // ILAT & IMASK != 0: the dispatch check may act
+        BarrierIdle = 1u << 3,              // the block entered architectural IDLE
+        BarrierGuestDeadline = 1u << 4,     // the core timer expired during the block
+        BarrierPllCountdown = 1u << 5,      // a PLL lock or awake-bypass countdown is outstanding
+        BarrierDeviceWork = 1u << 6,        // some device's service pass is not proven a no-op
+        BarrierQueuedEvents = 1u << 7,      // queued events or SIC latch requests
+        BarrierTracing = 1u << 8,           // per-block tracing is enabled
+    };
+    static constexpr unsigned kBatchBarrierCount = 9;
+    struct BatchDiagnostics {
+        uint64_t blocks = 0;                     // awake blocks evaluated
+        uint64_t eligible = 0;                   // blocks with no barrier
+        uint64_t barriers[kBatchBarrierCount] = {};
+        std::vector<uint64_t> deviceWork;        // per device (devices order), plus GP timer ticks last
+        uint64_t verified = 0, mismatches = 0;   // eligible passes run and compared
+        std::string firstMismatch;
+    };
+    void SetBatchDiagnostics(bool enabled, bool verify);
+    const BatchDiagnostics& BatchStats() const { return batchStats_; }
+    uint32_t LastBatchBarriers() const { return lastBatchBarriers_; }
+    std::string DeviceName(size_t index) const;
+
+    // Exact, named emulator state after a block (CPU, CEC, SIC, DMA, SPORT,
+    // guest clock, core timer, PLL, NFC/RTC/TWI/USB registers without read
+    // side effects, queued work, DMA memory writes). Host-time values
+    // (RTC_STAT, CYCLES) and diagnostic counters are excluded.
+    using BlockState = std::vector<std::pair<std::string, uint64_t>>;
+    BlockState CaptureBlockState();
+    // First differing field, or empty when equal.
+    static std::string DiffBlockState(const BlockState& a, const BlockState& b);
+    // Exact log of guest MMR accesses (nullptr stops logging).
+    void SetMMIOLog(std::vector<MMIOAccess>* log);
     bool Failed() const { return failed_.load(std::memory_order_acquire); }
     BF524PLL& ClockState() { return *pll_; }
     struct AwakePLLStats { uint64_t consumed = 0, overshoot = 0, blocks = 0, expiries = 0; };
@@ -118,6 +161,12 @@ protected:
     void QueueInterruptRaise(int ivg);
     void LatchRequestedInterrupts();
     void RepeatAssertedAfterReturn(u32 ipendBefore);
+    uint32_t EvaluateBatchBarriers(u32 ipendBefore, u32 ilatBefore, uint64_t mmioBefore, uint64_t expiriesBefore,
+                                   bool gpTimerTickDue);
+    // Out of line so that the disabled path costs only the flag tests in Run().
+    [[gnu::cold, gnu::noinline]] bool DiagnoseBatchBlock(u32 ipendBefore, u32 ilatBefore, uint64_t mmioBefore,
+                                                         uint64_t expiriesBefore, bool gpTimerTickDue);
+    [[gnu::cold, gnu::noinline]] void VerifyBatchPass();
     void ProcessEvents();
     void ServiceIdle();
     void ReportUnsupportedIdle(const char* reason);
@@ -171,6 +220,12 @@ protected:
     // IVGs with a SIC line rising edge not yet latched (bit n = IVGn), guarded
     // by eventQueueMutex: the SIC may be driven from a host thread (USB).
     u32 requestedRaises_ = 0;
+    bool batchDiagnostics_ = false;
+    bool batchVerify_ = false;
+    bool perBlockTracing_ = false;
+    uint32_t lastBatchBarriers_ = 0;
+    BatchDiagnostics batchStats_;
+    BlockState batchPassBefore_;
     InterruptRaiseStats raiseStats_;
     std::chrono::nanoseconds elapsedTime{0};
     std::chrono::system_clock::time_point startTime;

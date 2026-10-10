@@ -167,14 +167,27 @@ void NFC::CalculateECC(const u8* data, u32 length) {
     }
 }
 
-void NFC::UpdateInterrupts() {
+int NFC::InterruptLevel() {
     u16 intStat = Read32(0x08);
     // NOTE that irqmask bits are active low
-    if (intStat & (~irqmask)) {
-        TriggerInterrupt(1);
-    } else {
-        TriggerInterrupt(0);
-    }
+    return (intStat & (~irqmask)) ? 1 : 0;
+}
+
+void NFC::UpdateInterrupts() {
+    drivenLevel = InterruptLevel();
+    TriggerInterrupt(drivenLevel);
+}
+
+// ProcessWithInterrupt() changes nothing when the NAND has no reset or page
+// read to complete, its busy state already matches notBusy (no rising edge to
+// record), no read request is waiting to become ready, and the interrupt level
+// it would drive is the level already driven.
+bool NFC::ServiceIsNoOp() {
+    if (!nandFlash || nandFlash->HasPendingCompletion()) return false;
+    const bool busy = nandFlash->IsBusy();
+    if (notBusy != !busy) return false;
+    if (readRequestPending && !readDataReady && !busy) return false;
+    return drivenLevel == InterruptLevel();
 }
 
 void NFC::SetNotBusy(bool value) {

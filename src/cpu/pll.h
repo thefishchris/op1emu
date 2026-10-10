@@ -8,6 +8,8 @@
 // Disconnected input-clock domain: neither packets nor host time advance it.
 class BF524PLL final : public RegisterDevice {
 public:
+    // ProcessWithInterrupt() is the inherited no-op, so skipping it changes nothing.
+    bool ServiceIsNoOp() override { return true; }
     explicit BF524PLL(uint64_t provisionalClkinHz = 0);
     bool EnterIdle(); // Commit a pending programming request; false if none.
     void AdvanceClkin(uint64_t ticks);

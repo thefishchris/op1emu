@@ -24,6 +24,7 @@ public:
     bool IsCompleted() const { return completed; }
     DMAPeripheralType GetPeripheralType() const { return peripheralType; }
     u32 RowBytesRemaining() const { return currXCount * (1u << wordSize); }
+    bool WritesMemory() const { return memoryWrite; }
 
     u32 ProcessTransfer();
 
@@ -249,6 +250,7 @@ u32 DMAChannel::ProcessTransfer() {
         const u32 totalXCount = xCount ? xCount : 65536;
         totalBytes = bus->DMARead(totalXCount - currXCount, yCount - currYCount, buffer, totalBytes);
         totalBytes -= totalBytes % elementBytes; // only write whole elements
+        dma.NoteMemoryWrite(currAddr, buffer, totalBytes);
         if (xModify == elementBytes) {
             dma.GetEmulator().MemoryWrite(currAddr, buffer, totalBytes);
         } else {
@@ -376,6 +378,18 @@ u32 DMA::Read32(u32 offset) {
 // bounded by FIFO capacity; MDMA_BURST_BYTES is just an extra guard against
 // FLOW=Autobuffer auto-restarting the transfer indefinitely.
 static constexpr u32 MDMA_BURST_BYTES = 4096;
+
+bool DMA::ServiceIsNoOp() {
+    for (size_t i = 0; i < channels.size(); i++) {
+        if (!(activeChannels & (1u << i))) continue;
+        const auto& channel = channels[i];
+        if (channel->IsMDMA() || channel->RowBytesRemaining() == 0) return false;
+        const auto bus = dmaBuses.find(channel->GetPeripheralType());
+        if (bus == dmaBuses.end() || !bus->second) return false;
+        if (bus->second->TransferPossible(channel->WritesMemory())) return false;
+    }
+    return true;
+}
 
 void DMA::RefreshActive(size_t channel) {
     const uint16_t bit = static_cast<uint16_t>(1u << channel);
