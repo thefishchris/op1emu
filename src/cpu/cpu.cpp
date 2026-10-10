@@ -424,6 +424,7 @@ HaltReason BlackFinCpu::Run() {
     const uint64_t guestPacketsBefore = cpuState_->packet_entries;
     const uint64_t guestShadowBefore =
         guestCostModel_ == GuestCostModel::ShadowEstimate && shadowTiming_ ? shadowTiming_->EstimatedCycles() : 0;
+    const u32 ipendBeforeBlock = cec_mmr_read(cpuState_.get(), CEC_MMR_BASE + 8);
     if (!ExecuteCoreBlock(cpuState_->pc)) {
         LogError("JIT execution failed at PC %08X", cpuState_->pc);
         failed_.store(true, std::memory_order_release);
@@ -491,6 +492,7 @@ HaltReason BlackFinCpu::Run() {
     }
 
     ProcessEvents();
+    RepeatAssertedAfterReturn(ipendBeforeBlock);
     return HaltReason::Break;
 }
 
@@ -770,30 +772,66 @@ void BlackFinCpu::QueueEvent(const std::function<void()>& event, std::chrono::na
     eventQueue.push_back({delay, event});
 }
 
-// One SIC forward = one cec_raise(ivg) event. Raises queued in the same epoch
-// by this call site carry the same delay and therefore run in the same
-// ProcessEvents pass. Within a pass a repeated raise of the same IVG cannot
-// change anything: cec_raise only ORs ILAT[ivg] and sets the pending flag
-// (both already done by the first), no event clears ILAT or dispatches, and
-// after a user-mode raise has taken the exception every later raise returns
-// on did_jump. So the repeats are not queued. Different IVGs, other events,
-// and raises in later passes are untouched.
+// cec_raise() returns without latching while did_jump is set, and a dispatch
+// earlier in this Run() (for example the core timer's IVG6) sets it. Latch
+// with the flag clear, then keep any jump it recorded.
+static void LatchIvg(CpuState* cpu, uint32_t ivg) {
+    const bool jumped = cpu->did_jump;
+    cpu->did_jump = false;
+    cec_raise(cpu, ivg);
+    cpu->did_jump = cpu->did_jump || jumped;
+}
+
+// SIC line rising edge -> CEC latch request (docs/sic-interrupt-delivery.md).
+// Requests are recorded, not queued as events; ProcessEvents latches them.
 void BlackFinCpu::QueueInterruptRaise(int ivg) {
     std::unique_lock<std::recursive_mutex> lock(eventQueueMutex);
     ++raiseStats_.requested;
-    if (ivg >= 0 && ivg < 16) {
-        if (raiseDedupe_ && raiseQueuedEpoch_[ivg] == eventPassEpoch_) return;
-        raiseQueuedEpoch_[ivg] = eventPassEpoch_;
+    if (ivg >= 0 && ivg < 32) requestedRaises_ |= 1u << ivg;
+}
+
+// Latch each requested IVG into ILAT, except an IVG being serviced: the CEC
+// does not latch a re-trigger of an interrupt in service (PGR 4-41). If its
+// line is still asserted when that service ends, RepeatAssertedAfterReturn
+// latches it then.
+void BlackFinCpu::LatchRequestedInterrupts() {
+    std::unique_lock<std::recursive_mutex> lock(eventQueueMutex);
+    u32 requested = requestedRaises_;
+    requestedRaises_ = 0;
+    if (!requested) return;
+    const u32 ipend = cec_mmr_read(cpuState_.get(), CEC_MMR_BASE + 8);
+    for (int ivg = 0; requested; ++ivg, requested >>= 1) {
+        if (!(requested & 1u)) continue;
+        if (ipend & (1u << ivg)) { ++raiseStats_.inService; continue; }
+        ++raiseStats_.latched;
+        LatchIvg(cpuState_.get(), static_cast<uint32_t>(ivg));
     }
-    ++raiseStats_.queued;
-    QueueEvent([this, ivg]() {
-        cec_raise(cpuState_.get(), ivg);
-    });
+}
+
+// Level-sensitive re-pend (HRM 5-13, PGR 4-54): when the service of IVGn
+// ends (its IPEND bit cleared by RTI) while a source routed to IVGn is still
+// asserted, ILAT[n] is set again at once. Called after the device loop, so
+// lines reflect peripherals that update their request only there.
+void BlackFinCpu::RepeatAssertedAfterReturn(u32 ipendBefore) {
+    const u32 ipend = cec_mmr_read(cpuState_.get(), CEC_MMR_BASE + 8);
+    const u32 returned = ipendBefore & ~ipend & 0xFF80u; // IVG7..IVG15
+    if (!returned) return;
+    bool latched = false;
+    for (int ivg = 7; ivg < 16; ++ivg) {
+        if (!(returned & (1u << ivg)) || !sic->LineAsserted(ivg)) continue;
+        {
+            std::unique_lock<std::recursive_mutex> lock(eventQueueMutex);
+            ++raiseStats_.repended;
+        }
+        LatchIvg(cpuState_.get(), static_cast<uint32_t>(ivg));
+        latched = true;
+    }
+    if (latched) cec_check_pending(cpuState_.get());
 }
 
 void BlackFinCpu::ProcessEvents() {
     std::unique_lock<std::recursive_mutex> lock(eventQueueMutex);
-    ++eventPassEpoch_; // Odd: events queued during this pass.
+    LatchRequestedInterrupts();
     constexpr std::chrono::nanoseconds instructionTime(1); // Approximate instruction execution time
     auto events = eventQueue;
     for (auto& [delay, event] : events) {
@@ -812,7 +850,6 @@ void BlackFinCpu::ProcessEvents() {
         }
     }
     elapsedTime += instructionTime;
-    ++eventPassEpoch_; // Even: events queued before the next pass.
 }
 
 void BlackFinCpu::AttachDisplay(const std::shared_ptr<Display>& display) {

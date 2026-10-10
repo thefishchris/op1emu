@@ -93,17 +93,16 @@ public:
 
     void QueueEvent(const std::function<void()>& event, std::chrono::nanoseconds delay = std::chrono::nanoseconds(1));
 
-    // SIC -> CEC raise requests (docs/device-polling-fast-paths.md). `requested`
-    // counts forwards from the SIC, `queued` the raise events actually queued.
-    struct InterruptRaiseStats { uint64_t requested = 0, queued = 0; };
+    // SIC -> CEC delivery (docs/sic-interrupt-delivery.md):
+    //  - requested: rising edges of SIC lines (latch requests);
+    //  - latched: requests latched into ILAT;
+    //  - inService: requests dropped because that IVG was being serviced
+    //    (re-pended at its RTI instead if the line is still asserted);
+    //  - repended: latches made at RTI for a still-asserted line.
+    struct InterruptRaiseStats { uint64_t requested = 0, latched = 0, inService = 0, repended = 0; };
     InterruptRaiseStats RaiseStats() {
         std::lock_guard<std::recursive_mutex> lock(eventQueueMutex);
         return raiseStats_;
-    }
-    // Equivalence tests compare against queueing every raise; default on.
-    void SetInterruptRaiseDedupe(bool enabled) {
-        std::lock_guard<std::recursive_mutex> lock(eventQueueMutex);
-        raiseDedupe_ = enabled;
     }
 
     void AttachDisplay(const std::shared_ptr<Display>& display);
@@ -117,6 +116,8 @@ protected:
     virtual bool ExecuteCoreBlock(u32 address);
     void ProcessInterrupt(int pin, int level);
     void QueueInterruptRaise(int ivg);
+    void LatchRequestedInterrupts();
+    void RepeatAssertedAfterReturn(u32 ipendBefore);
     void ProcessEvents();
     void ServiceIdle();
     void ReportUnsupportedIdle(const char* reason);
@@ -167,14 +168,9 @@ protected:
     std::vector<std::shared_ptr<Device>> devices;
     std::vector<std::tuple<std::chrono::nanoseconds, std::function<void()>>> eventQueue;
     std::recursive_mutex eventQueueMutex;
-    // Raise de-duplication (QueueInterruptRaise), guarded by eventQueueMutex.
-    // The epoch is odd while ProcessEvents runs and even between passes, so
-    // raises with the same epoch execute in the same pass.
-    uint64_t eventPassEpoch_ = 0;
-    uint64_t raiseQueuedEpoch_[16] = {UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
-                                      UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX,
-                                      UINT64_MAX, UINT64_MAX, UINT64_MAX, UINT64_MAX};
-    bool raiseDedupe_ = true;
+    // IVGs with a SIC line rising edge not yet latched (bit n = IVGn), guarded
+    // by eventQueueMutex: the SIC may be driven from a host thread (USB).
+    u32 requestedRaises_ = 0;
     InterruptRaiseStats raiseStats_;
     std::chrono::nanoseconds elapsedTime{0};
     std::chrono::system_clock::time_point startTime;
