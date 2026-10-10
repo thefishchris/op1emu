@@ -7,6 +7,8 @@
 #include <vector>
 #include <queue>
 #include <memory>
+#include <atomic>
+#include <cstdint>
 
 struct __attribute__ ((__packed__)) USBSetupBytes {
     union {
@@ -96,6 +98,7 @@ public:
 
     void Read(u32 offset, void* buffer, u32 length) override;
     void Write(u32 offset, const void* buffer, u32 length) override;
+    void Write32(u32 offset, u32 value) override;
 
     void HandleSetupPacket(USBSetupBytes setup, const u8* data, std::size_t length, ReplyCallback callback) override;
     void HandleDataWrite(int ep, int interval, const u8* data, std::size_t length, WriteDoneCallback callback) override;
@@ -103,9 +106,24 @@ public:
 
     void ProcessWithInterrupt(int ivg) override;
 
+    // Per-block polling counters (CPU thread). `calls` counts polls while
+    // GLOBAL_ENA is set; `fastPath` of them skipped the endpoint walk.
+    struct PollStats { uint64_t calls = 0, fastPath = 0, walks = 0; };
+    PollStats Stats() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return pollStats;
+    }
+    // Equivalence tests compare against the always-walk path; default on.
+    void SetInactiveFastPath(bool allowed) {
+        std::lock_guard<std::mutex> lock(mutex);
+        fastPathAllowed = allowed;
+    }
+
 protected:
     void UpdateInterrupts();
+    void DriveInterruptLines();
     void ProcessTransfer();
+    bool NoPendingWork() const;
 
     u16 ReadFifo(int ep);
     void WriteFifo(int ep, u16 value);
@@ -161,4 +179,17 @@ protected:
 
     ReplyCallback setupCallback = nullptr;
     std::mutex mutex;
+
+    // Inactive fast path (ProcessTransfer). workPending is set by every guest
+    // register write (CPU thread) and by every host request (under `mutex`),
+    // and recomputed under `mutex` at the end of each full pass. It is only
+    // read under `mutex` on the CPU thread, so relaxed ordering suffices: the
+    // CPU thread's own writes are in program order and host writes are ordered
+    // by the mutex. The atomic only removes the formal CPU/host write race.
+    std::atomic<bool> workPending{true};
+    bool fastPathAllowed = true;
+    // Interrupt line levels from the last UpdateInterrupts() computation.
+    bool lineLevels[3] = {false, false, false};
+    bool lineLevelsValid = false;
+    PollStats pollStats;
 };

@@ -269,7 +269,14 @@ void USB::Read(u32 offset, void* buffer, u32 length) {
 }
 
 void USB::Write(u32 offset, const void* buffer, u32 length) {
+    workPending.store(true, std::memory_order_relaxed);
     RegisterDevice::Write(offset, buffer, length);
+}
+
+void USB::Write32(u32 offset, u32 value) {
+    // Any register write may create work or change an interrupt input.
+    workPending.store(true, std::memory_order_relaxed);
+    RegisterDevice::Write32(offset, value);
 }
 
 u16 USB::ReadFifo(int ep) {
@@ -365,9 +372,33 @@ void USB::UpdateInterrupts() {
         int2 |= rxIntsToINT2;
     }
 
-    interruptHandlers[int0Irq](int0Irq, int0 ? 1 : 0);
-    interruptHandlers[int1Irq](int1Irq, int1 ? 1 : 0);
-    interruptHandlers[int2Irq](int2Irq, int2 ? 1 : 0);
+    lineLevels[0] = int0;
+    lineLevels[1] = int1;
+    lineLevels[2] = int2;
+    lineLevelsValid = true;
+    DriveInterruptLines();
+}
+
+// The three line updates are always made, even when unchanged: each one
+// reaches SIC::SetInterruptLevel, whose forwarding behaviour is preserved.
+void USB::DriveInterruptLines() {
+    interruptHandlers[int0Irq](int0Irq, lineLevels[0] ? 1 : 0);
+    interruptHandlers[int1Irq](int1Irq, lineLevels[1] ? 1 : 0);
+    interruptHandlers[int2Irq](int2Irq, lineLevels[2] ? 1 : 0);
+}
+
+// True when a full ProcessTransfer pass would change nothing: no host request
+// or callback outstanding, no host data buffered, no FIFO data or packet ready
+// to move, and no EP0 DATAEND to complete. Requires `mutex`.
+bool USB::NoPendingWork() const {
+    if (setupCallback || endpoints[0].dataEnded) return false;
+    for (int i = 0; i < USB_NUM_ENDPOINTS; i++) {
+        const auto& ep = endpoints[i];
+        if (ep.txCallback || ep.rxCallback || !ep.rxBuffer.empty()) return false;
+        if ((epTxEnabled & (1 << i)) && ep.dataPacketInFIFO) return false;
+        if ((epRxEnabled & (1 << i)) && !ep.dataPacketReceived && !ep.rxFifo.empty()) return false;
+    }
+    return true;
 }
 
 void USB::BindInterrupt(int int0, int int1, int int2, int dmaint, InterruptHandler callback) {
@@ -396,6 +427,7 @@ void USB::HandleSetupPacket(USBSetupBytes setup, const u8* data, std::size_t len
     writeHostToDeviceFIFO(0, reinterpret_cast<const u8*>(&setup), sizeof(USBSetupBytes));
     writeHostToDeviceFIFO(0, data, length);
     setupCallback = callback;
+    workPending.store(true, std::memory_order_relaxed);
     ep0.dataPacketReceived = true;
     epTxInterrupts |= (1 << 0);
     UpdateInterrupts();
@@ -412,6 +444,7 @@ void USB::HandleDataWrite(int ep, int interval, const u8* data, std::size_t leng
     endpoint.rxBuffer.insert(endpoint.rxBuffer.end(), data + toWrite, data + length);
     endpoint.dataPacketReceived = true;
     endpoint.rxCallback = callback;
+    workPending.store(true, std::memory_order_relaxed);
     epRxInterrupts |= (1 << ep);
     UpdateInterrupts();
 }
@@ -422,11 +455,23 @@ void USB::HandleDataRead(int ep, int interval, std::size_t limit, ReplyCallback 
     auto& endpoint = endpoints[ep];
     endpoint.txLimit = limit;
     endpoint.txCallback = callback;
+    workPending.store(true, std::memory_order_relaxed);
 }
 
 void USB::ProcessTransfer() {
     if (!enabled) return;
     std::lock_guard<std::mutex> lock(mutex);
+    ++pollStats.calls;
+    // Inactive fast path: nothing a full pass reads has changed since the last
+    // full pass found no work, so the walk would change nothing and the
+    // interrupt computation would repeat its last result. Drive the same three
+    // lines with those levels, exactly as UpdateInterrupts() would.
+    if (fastPathAllowed && lineLevelsValid && !workPending.load(std::memory_order_relaxed)) {
+        ++pollStats.fastPath;
+        DriveInterruptLines();
+        return;
+    }
+    ++pollStats.walks;
 
     for (int i = 0; i < USB_NUM_ENDPOINTS; i++) {
         auto& ep = endpoints[i];
@@ -479,6 +524,7 @@ void USB::ProcessTransfer() {
         }
     }
     UpdateInterrupts();
+    workPending.store(!NoPendingWork(), std::memory_order_relaxed);
 }
 
 void USB::ProcessWithInterrupt(int ivg) {
