@@ -429,8 +429,16 @@ static void SetBfinCycles(CpuState& cpu_state, u64 cycles) {
     }
     // Permit only the explicit ideal/no-stall experiment with known CCLK=CLKIN.
     // A missing/unknown ratio is still an observable stop, never a guessed clock.
-    const bool advanceAwakeBypass = pll_->CanAdvanceAwakeBypass(awakePLLExperiment_);
-    if (pll_->NextDeadlineTicks() && !advanceAwakeBypass) {
+    // These depend only on PLL state (and the fixed experiment flag): reuse
+    // them until the PLL state version changes.
+    if (pll_->StateVersion() != pllVersionSeen_) {
+        pllVersionSeen_ = pll_->StateVersion();
+        pllAwakeBypass_ = pll_->CanAdvanceAwakeBypass(awakePLLExperiment_);
+        pllDeadlinePending_ = pll_->NextDeadlineTicks().has_value();
+        pllRatios_ = pll_->Ratios();
+    }
+    const bool advanceAwakeBypass = pllAwakeBypass_;
+    if (pllDeadlinePending_ && !advanceAwakeBypass) {
         ReportUnsupportedIdle("awake PLL bypass countdown needs a running CLKIN time source");
         return HaltReason::Break;
     }
@@ -455,7 +463,7 @@ static void SetBfinCycles(CpuState& cpu_state, u64 cycles) {
     const u32 blockPC = cpuState_->pc;
     // Guest clock: ratios in force at block start apply to the whole block.
     if (guestClockMode_) {
-        const auto ratios = pll_->Ratios();
+        const auto& ratios = pllRatios_;
         if (ratios != guestClock_.Ratios()) {
             LogInfo("guest-clock ratios known=%u units-per-clkin=%u cclk-units=%u sclk-units=%u clkin=%llu cclk=%llu",
                     ratios ? 1u : 0u, ratios ? ratios->unitsPerClkin : 0u, ratios ? ratios->cclkUnits : 0u,

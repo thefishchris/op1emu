@@ -17,6 +17,7 @@ BF524PLL::BF524PLL(uint64_t provisionalClkinHz)
             }
         };
         reg.writeCallback = [this, offset](u32 value) {
+            ++version_;
             switch (offset) {
             case 0:
                 ctlSame_ = ctl_ == (value & 0x7FEB);
@@ -36,6 +37,7 @@ BF524PLL::BF524PLL(uint64_t provisionalClkinHz)
 }
 
 bool BF524PLL::EnterIdle() {
+    ++version_;
     if (!ctlWritten_ && !vrWritten_) return false;
     if (remaining_) { unsupported_ = "programming during unfinished PLL transition"; return true; }
     if ((vr_ & 0x3000) != 0x3000) {
@@ -72,6 +74,7 @@ bool BF524PLL::EnterIdle() {
 }
 
 void BF524PLL::AdvanceClkin(uint64_t ticks) {
+    ++version_;
     ticks_ += ticks;
     const auto elapsed = std::min(ticks, remaining_);
     remaining_ -= elapsed;

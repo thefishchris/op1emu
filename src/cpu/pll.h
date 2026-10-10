@@ -15,7 +15,11 @@ public:
     void AdvanceClkin(uint64_t ticks);
     std::optional<uint64_t> NextDeadlineTicks() const;
     bool WakeAsserted() const { return wake_; }
-    void AcknowledgeWake() { wake_ = false; }
+    void AcknowledgeWake() { wake_ = false; ++version_; }
+    // Changes whenever any PLL state does (MMR writes, EnterIdle, AdvanceClkin,
+    // AcknowledgeWake). Every const query below depends only on that state, so
+    // a caller may reuse their answers while the version is unchanged.
+    uint64_t StateVersion() const { return version_; }
     const char* Unsupported() const { return unsupported_; }
     std::optional<u16> ActiveCtl() const { return activeCtl_; }
     u16 ActiveVR() const { return activeVR_; }
@@ -48,4 +52,5 @@ private:
     bool locked_ = true, temporaryBypass_ = false, wake_ = false;
     bool wakeOnLock_ = false;
     const char* unsupported_ = nullptr;
+    uint64_t version_ = 0;
 };

@@ -243,6 +243,11 @@ protected:
     uint64_t functionalIdleWakes_ = 0;
     std::atomic<bool> failed_{false};
     bool awakePLLExperiment_ = false;
+    // PLL answers used at every block start, valid for pllVersionSeen_
+    // (BF524PLL::StateVersion); refreshed whenever the PLL state changes.
+    uint64_t pllVersionSeen_ = UINT64_MAX;
+    bool pllAwakeBypass_ = false, pllDeadlinePending_ = false;
+    std::optional<ClockRatios> pllRatios_;
     AwakePLLStats awakePLLStats_;
     std::shared_ptr<GPIO> portG;
     std::shared_ptr<PPI> ppi;
