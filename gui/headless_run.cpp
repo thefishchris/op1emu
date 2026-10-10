@@ -77,7 +77,10 @@ int RunHeadlessEmulator(int argc, char** argv) {
             }
             return true;
         };
-        if (positional.size() > 1) { if (!loadDxe()) throw std::runtime_error("Empty LDR"); }
+        if (positional.size() > 1) {
+            if (!loadDxe()) throw std::runtime_error("Empty LDR");
+            cpu.AddBatchStopPC(0x08000000); // The DXE return address is checked between Run() calls.
+        }
         else cpu.SetPC(0xEF000000);
         const auto start = HeadlessFrontend::Clock::now(); auto nextPoll = start;
         uint64_t sensorVersion = UINT64_MAX;

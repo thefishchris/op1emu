@@ -20,6 +20,8 @@ std::atomic<bool> cpuShouldStop(false);
 
 void LdrExecutionThread(BlackFinCpu& cpu, const LDRParser& parser) {
     const auto& dxes = parser.getDXEs();
+    // PCs checked between Run() calls: a multi-block batch must stop there.
+    for (u32 stop : {0x8000000u, 0xffa06e54u, 0xffa06eecu}) cpu.AddBatchStopPC(stop);
     for (const auto& dxe : dxes) {
         for (const auto& block : dxe.blocks) {
             if (!block.data.empty()) {

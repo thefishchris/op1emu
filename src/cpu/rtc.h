@@ -1,5 +1,6 @@
 #pragma once
 
+#include "host_clock.h"
 #include "io.h"
 #include <chrono>
 
@@ -10,12 +11,22 @@ public:
     void Tick();  // Called periodically to update RTC state
     void ProcessWithInterrupt(int ivg) override;
     bool ServiceIsNoOp() override;
+    // ServiceIsNoOp() with host time sampled at `now`.
+    bool ServiceIsNoOpAt(std::chrono::system_clock::time_point now);
+    // Only the host-time part: RTC_STAT at `now` still equals the last value
+    // Tick() recorded. Everything else ServiceIsNoOp() reads changes only by
+    // MMR writes or by Tick() itself.
+    bool StatUnchangedAt(std::chrono::system_clock::time_point now);
+    // Tests only: replace the host clock (default: system_clock).
+    void SetHostClock(HostClockFn clock);
 
 private:
     void UpdateInterrupts();
     int InterruptLevel();
     int drivenLevel = -1; // Last level driven by UpdateInterrupts(); -1 before the first.
     u32 GetCurrentStat();
+    u32 StatAt(std::chrono::system_clock::time_point now) const;
+    HostClockFn hostClock_ = nullptr;
 
     bool stopwatchIntEnabled = false;
     bool alarmIntEnabled = false;

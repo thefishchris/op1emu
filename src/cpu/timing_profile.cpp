@@ -87,6 +87,17 @@ TimingConfig ResolveTimingConfig(const EnvironmentLookup& environment) {
     }
     config.coreTimerRunsInIdle = functional && config.guestClock;
     if (functional && config.guestClock && config.clkinHz) config.sportFrameHz = kAssumedSportFrameHz;
+    if (const char* value = environment("OP1EMU_EXPERIMENTAL_MULTIBLOCK")) {
+        const bool crossCheck = std::strcmp(value, "crosscheck") == 0;
+        if (!crossCheck && std::strcmp(value, "1") != 0 && std::strcmp(value, "0") != 0)
+            throw std::invalid_argument("OP1EMU_EXPERIMENTAL_MULTIBLOCK must be 0, 1 or crosscheck");
+        if (std::strcmp(value, "0") != 0) {
+            if (!functional || !config.guestClock)
+                throw std::invalid_argument("OP1EMU_EXPERIMENTAL_MULTIBLOCK requires OP1EMU_PROFILE=functional with the guest clock");
+            config.multiBlock = true;
+            config.multiBlockCrossCheck = crossCheck;
+        }
+    }
     if (const char* value = environment("OP1EMU_GUEST_CLOCK_COST")) {
         if (std::strcmp(value, "shadow-estimate") == 0) config.costModel = GuestCostModel::ShadowEstimate;
         else if (std::strcmp(value, "min-cost") != 0)
@@ -113,6 +124,10 @@ TimingConfig ResolveTimingConfig(const EnvironmentLookup& environment) {
         config.assumptions.push_back("ASSUMED: external SPORT0 audio clock corresponds to 44.1 kHz native frame rate "
                                      "(LIKELY from firmware audio-engine evidence; codec MCLK inferred as 11.2896 MHz); "
                                      "SPORT paced on guest CLKIN, physical clock UNKNOWN");
+    if (config.multiBlock)
+        config.assumptions.push_back("EXPERIMENTAL: multi-block execution skips device passes proven to change nothing; "
+                                     "host-time sources are sampled at block boundaries and caller work between Run() "
+                                     "calls waits for up to 64 blocks");
     return config;
 }
 

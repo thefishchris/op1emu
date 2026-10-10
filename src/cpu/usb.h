@@ -110,6 +110,10 @@ public:
     // already driven, which the level-sensitive SIC ignores. Host requests set
     // workPending under the mutex, so a pending host request is never idle.
     bool ServiceIsNoOp() override;
+    // Host-thread work only (no lock): every host request sets workPending.
+    // The rest of ServiceIsNoOp() changes only on the CPU thread, by MMR
+    // writes or by the service pass itself.
+    bool HostWorkPending() const { return enabled && workPending.load(std::memory_order_relaxed); }
 
     // Per-block polling counters (CPU thread). `calls` counts polls while
     // GLOBAL_ENA is set; `fastPath` of them skipped the endpoint walk.

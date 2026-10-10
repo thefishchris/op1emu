@@ -1,6 +1,7 @@
 #pragma once
 
 #include "emu.h"
+#include "host_clock.h"
 #include "mmio_access.h"
 #include "guest_clock.h"
 #include "timing_profile.h"
@@ -10,6 +11,7 @@
 #include <chrono>
 #include <string>
 #include <utility>
+#include <functional>
 #include <optional>
 
 // Forward declarations for bcore types (headers included in cpu.cpp only)
@@ -49,6 +51,7 @@ class Potentiometer;
 class GPIOPeripheral;
 class SPORT;
 class AudioOutput;
+class RTC;
 
 class BlackFinCpu : public CpuInterface {
 public:
@@ -99,8 +102,13 @@ public:
         BarrierDeviceWork = 1u << 6,        // some device's service pass is not proven a no-op
         BarrierQueuedEvents = 1u << 7,      // queued events or SIC latch requests
         BarrierTracing = 1u << 8,           // per-block tracing is enabled
+        // M1 only (ends of a multi-block batch):
+        BarrierBudget = 1u << 9,            // kMaxBatchBlocks reached
+        BarrierStopPC = 1u << 10,           // the next PC is one the caller inspects between Run() calls
+        BarrierCrossCheck = 1u << 11,       // crosscheck: the full proof disagreed with the incremental one
     };
     static constexpr unsigned kBatchBarrierCount = 9;
+    static constexpr unsigned kBatchEndCount = 12;
     struct BatchDiagnostics {
         uint64_t blocks = 0;                     // awake blocks evaluated
         uint64_t eligible = 0;                   // blocks with no barrier
@@ -113,6 +121,31 @@ public:
     const BatchDiagnostics& BatchStats() const { return batchStats_; }
     uint32_t LastBatchBarriers() const { return lastBatchBarriers_; }
     std::string DeviceName(size_t index) const;
+
+    // Multi-block execution, milestone M1 (docs/multiblock-execution.md):
+    // with OP1EMU_EXPERIMENTAL_MULTIBLOCK=1 (functional guest-clock profile
+    // only), Run() executes up to kMaxBatchBlocks cached blocks and skips the
+    // device pass after a block when that pass is proven to change nothing.
+    static constexpr uint64_t kMaxBatchBlocks = 64;
+    struct MultiBlockStats {
+        uint64_t runs = 0;            // Run() calls (host dispatches)
+        uint64_t blocks = 0;          // guest blocks executed by those calls
+        uint64_t skippedPasses = 0;   // device passes proven no-op and skipped
+        uint64_t ends[kBatchEndCount] = {}; // why a pass was not skipped (barrier bit index)
+        uint64_t crossChecks = 0, crossCheckFailures = 0;
+        std::string firstCrossCheckFailure;
+    };
+    bool MultiBlock() const { return multiBlock_; }
+    // Tests: switch batching (throws unless the functional guest-clock profile).
+    void SetMultiBlock(bool enabled, bool crossCheck);
+    const MultiBlockStats& MultiBlockStatistics() const { return multiBlockStats_; }
+    // A caller that inspects PC() between Run() calls registers that PC so a
+    // batch never runs past it.
+    void AddBatchStopPC(u32 pc) { batchStopPCs_.push_back(pc); }
+    // Tests: host time for CYCLES, GP timer ticks and the RTC (default: system_clock).
+    void SetHostClock(HostClockFn clock);
+    // Tests: called after every guest block, whether its device pass ran or was skipped.
+    void SetBlockObserver(std::function<void()> observer) { blockObserver_ = std::move(observer); }
 
     // Exact, named emulator state after a block (CPU, CEC, SIC, DMA, SPORT,
     // guest clock, core timer, PLL, NFC/RTC/TWI/USB registers without read
@@ -157,6 +190,16 @@ public:
 
 protected:
     virtual bool ExecuteCoreBlock(u32 address);
+    // One guest block and, unless proven a no-op and skipped, its device pass.
+    HaltReason RunBlock();
+    // M1: true when the device pass after this block is proven a no-op (and is skipped).
+    [[gnu::noinline]] bool SkipPass(u32 ipendBefore, u32 ilatBefore, uint64_t mmioBefore, uint64_t expiriesBefore,
+                                    bool gpTimerTickDue);
+    // M1: 0 when the device pass after this block may be skipped, else the barrier that forbids it.
+    uint32_t BatchContinueBarrier(u32 ipendBefore, u32 ilatBefore, uint64_t mmioBefore, uint64_t expiriesBefore,
+                                  bool gpTimerTickDue);
+    bool AllDevicesServiceNoOp(std::chrono::system_clock::time_point now);
+    [[gnu::cold, gnu::noinline]] void LogMultiBlockStats();
     void ProcessInterrupt(int pin, int level);
     void QueueInterruptRaise(int ivg);
     void LatchRequestedInterrupts();
@@ -208,6 +251,7 @@ protected:
     std::shared_ptr<DMA> dma;
     std::shared_ptr<GPTimer> gptimer;
     std::shared_ptr<USBDevice> usb;
+    std::shared_ptr<RTC> rtc_;
     std::shared_ptr<SPORT> sport0;
     std::shared_ptr<SPORT> sport1;
     std::shared_ptr<ADXL345> adxl345;
@@ -220,6 +264,21 @@ protected:
     // IVGs with a SIC line rising edge not yet latched (bit n = IVGn), guarded
     // by eventQueueMutex: the SIC may be driven from a host thread (USB).
     u32 requestedRaises_ = 0;
+    // eventQueue non-empty or requestedRaises_ != 0. Set with every push, and
+    // recomputed under eventQueueMutex at the end of ProcessEvents(); read
+    // without the lock by the multi-block check (a late push is seen at the
+    // next block boundary, as if it had arrived after that pass).
+    std::atomic<bool> eventsPending_{false};
+    bool multiBlock_ = false;
+    bool multiBlockCrossCheck_ = false;
+    bool batchContinue_ = false;                // RunBlock() skipped its pass; Run() continues
+    uint64_t batchLength_ = 0;                  // blocks completed in this Run()
+    bool batchHostTimeValid_ = false;           // batchHostTime_ is the next block's host time
+    std::chrono::system_clock::time_point batchHostTime_;
+    std::vector<u32> batchStopPCs_;
+    MultiBlockStats multiBlockStats_;
+    std::function<void()> blockObserver_;
+    HostClockFn hostClock_ = nullptr;
     bool batchDiagnostics_ = false;
     bool batchVerify_ = false;
     bool perBlockTracing_ = false;

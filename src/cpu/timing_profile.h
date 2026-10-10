@@ -53,6 +53,13 @@ struct TimingConfig {
     // evidence, docs/sport-frame-format.md); the physical codec MCLK is
     // UNKNOWN. 0: SPORT keeps its legacy host-time pacing.
     uint32_t sportFrameHz = 0;
+    // OP1EMU_EXPERIMENTAL_MULTIBLOCK=1 (functional profile with the guest
+    // clock only): run consecutive cached blocks without the per-block device
+    // pass while that pass is proven to change nothing
+    // (docs/multiblock-execution.md). EXPERIMENTAL, off by default.
+    // "crosscheck" also re-derives every incremental proof in full.
+    bool multiBlock = false;
+    bool multiBlockCrossCheck = false;
     // Every enabled timing assumption, with its evidence label. Empty when
     // nothing beyond the evidence-backed model is in effect.
     std::vector<std::string> assumptions;

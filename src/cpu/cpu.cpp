@@ -209,6 +209,7 @@ BlackFinCpu::BlackFinCpu() : pc(0) {
     devices.emplace_back(nfc);
 
     std::shared_ptr<RTC> rtc = std::make_shared<RTC>(0xFFC00300);
+    rtc_ = rtc;
     rtc->BindInterrupt(IRQ_RTC, irqHandler);
     devices.emplace_back(rtc);
 
@@ -367,6 +368,29 @@ BlackFinCpu::BlackFinCpu() : pc(0) {
         SetBatchDiagnostics(true, verify);
         LogInfo("Batch diagnostics enabled%s (passive: service passes are not skipped)", verify ? " with verification" : "");
     }
+    if (timing_.multiBlock) {
+        if (batchDiagnostics_) throw std::invalid_argument("OP1EMU_EXPERIMENTAL_MULTIBLOCK and OP1EMU_BATCH_DIAG are exclusive");
+        SetMultiBlock(true, timing_.multiBlockCrossCheck);
+        LogInfo("Multi-block execution EXPERIMENTAL: up to %llu blocks per dispatch, device passes skipped only when "
+                "proven no-op%s (docs/multiblock-execution.md)", static_cast<unsigned long long>(kMaxBatchBlocks),
+                multiBlockCrossCheck_ ? "; every incremental proof cross-checked in full" : "");
+    }
+}
+
+void BlackFinCpu::SetMultiBlock(bool enabled, bool crossCheck) {
+    if (enabled && (timing_.profile != EmulatorProfile::Functional || !guestClockMode_ || !guestCoreTimer_))
+        throw std::invalid_argument("multi-block execution requires the functional profile with the guest clock");
+    if (enabled && batchDiagnostics_) throw std::invalid_argument("multi-block execution excludes batch diagnostics");
+    multiBlock_ = enabled;
+    multiBlockCrossCheck_ = enabled && crossCheck;
+    multiBlockStats_ = MultiBlockStats{};
+}
+
+void BlackFinCpu::SetHostClock(HostClockFn clock) {
+    hostClock_ = clock;
+    rtc_->SetHostClock(clock);
+    startTime = HostNow(clock);
+    batchHostTimeValid_ = false;
 }
 
 BlackFinCpu::~BlackFinCpu() {
@@ -394,7 +418,8 @@ static void SetBfinCycles(CpuState& cpu_state, u64 cycles) {
     cpu_state.cycles[2] = cpu_state.cycles[1];
 }
 
-HaltReason BlackFinCpu::Run() {
+// Inlined into Run(), its only caller.
+[[gnu::always_inline]] inline HaltReason BlackFinCpu::RunBlock() {
     if (Failed()) return HaltReason::Break;
     if (unsupportedIdle_) return HaltReason::Break;
     if (cpuState_->idle) {
@@ -408,7 +433,10 @@ HaltReason BlackFinCpu::Run() {
         ReportUnsupportedIdle("awake PLL bypass countdown needs a running CLKIN time source");
         return HaltReason::Break;
     }
-    auto microSecondsElapsed = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now() - startTime).count();
+    // Within a batch, the instant the previous block's skipped pass was proven a no-op.
+    const auto hostTime = batchHostTimeValid_ ? batchHostTime_ : HostNow(hostClock_);
+    batchHostTimeValid_ = false;
+    auto microSecondsElapsed = std::chrono::duration_cast<std::chrono::microseconds>(hostTime - startTime).count();
     auto cyclesElapsed = microSecondsElapsed * 400; // assuming 400MHz CPU clock
     // Sync cycles with system time
     SetBfinCycles(*cpuState_, cyclesElapsed);
@@ -441,7 +469,7 @@ HaltReason BlackFinCpu::Run() {
     const u32 ipendBeforeBlock = cec_mmr_read(cpuState_.get(), CEC_MMR_BASE + 8);
     u32 ilatBeforeBlock = 0;
     uint64_t mmioBeforeBlock = 0, expiriesBeforeBlock = 0;
-    if (batchDiagnostics_) {
+    if (batchDiagnostics_ || multiBlock_) {
         ilatBeforeBlock = cec_mmr_read(cpuState_.get(), CEC_MMR_BASE + 12);
         mmioBeforeBlock = bcoreMemory_->MMIOAccessCount();
         expiriesBeforeBlock = guestCoreTimer_ ? guestCoreTimer_->Expiries() : 0;
@@ -503,6 +531,11 @@ HaltReason BlackFinCpu::Run() {
         return HaltReason::Break;
     }
     cec_check_pending(cpuState_.get());
+    if (multiBlock_ && SkipPass(ipendBeforeBlock, ilatBeforeBlock, mmioBeforeBlock, expiriesBeforeBlock,
+                                cyclesElapsed % 10000 == 0)) {
+        batchContinue_ = true; // Everything below is proven to change nothing for this block.
+        return HaltReason::Break;
+    }
 
     // Get active IVG from CEC
     int ivg = cec_current_ivg();
@@ -520,6 +553,28 @@ HaltReason BlackFinCpu::Run() {
     RepeatAssertedAfterReturn(ipendBeforeBlock);
     if (verifyPass) VerifyBatchPass();
     return HaltReason::Break;
+}
+
+// Up to kMaxBatchBlocks blocks; every block but the last skipped a device pass
+// that BatchContinueBarrier() proved would change nothing. Without batching
+// this is exactly one block and its pass.
+HaltReason BlackFinCpu::Run() {
+    batchLength_ = 0;
+    batchHostTimeValid_ = false;
+    HaltReason reason;
+    do {
+        batchContinue_ = false;
+        reason = RunBlock();
+        ++batchLength_;
+        if (blockObserver_) blockObserver_();
+    } while (batchContinue_);
+    if (multiBlock_) {
+        ++multiBlockStats_.runs;
+        const uint64_t before = multiBlockStats_.blocks;
+        multiBlockStats_.blocks += batchLength_;
+        if ((before >> 24) != (multiBlockStats_.blocks >> 24)) LogMultiBlockStats();
+    }
+    return reason;
 }
 
 void BlackFinCpu::SetRegister(int index, u32 value) {
@@ -777,6 +832,94 @@ void BlackFinCpu::VerifyBatchPass() {
     }
 }
 
+bool BlackFinCpu::SkipPass(u32 ipendBefore, u32 ilatBefore, uint64_t mmioBefore, uint64_t expiriesBefore,
+                           bool gpTimerTickDue) {
+    const uint32_t barrier = BatchContinueBarrier(ipendBefore, ilatBefore, mmioBefore, expiriesBefore, gpTimerTickDue);
+    if (barrier) {
+        ++multiBlockStats_.ends[static_cast<unsigned>(__builtin_ctz(barrier))];
+        return false;
+    }
+    ++multiBlockStats_.skippedPasses;
+    elapsedTime += std::chrono::nanoseconds(1); // as ProcessEvents() would (no reader)
+    return true;
+}
+
+// The device pass after this block (device loop, GP timer tick, events, SIC
+// re-pend; docs/multiblock-execution.md) may be skipped only if it is proven
+// to change nothing. Called after cec_check_pending(), as the pass would be.
+// Host time is sampled once, here: the skipped pass is equivalent to one run
+// at this instant, which also becomes the next block's host time.
+uint32_t BlackFinCpu::BatchContinueBarrier(u32 ipendBefore, u32 ilatBefore, uint64_t mmioBefore, uint64_t expiriesBefore,
+                                           bool gpTimerTickDue) {
+    if (batchLength_ + 1 >= kMaxBatchBlocks) return BarrierBudget;
+    if (perBlockTracing_) return BarrierTracing;
+    CpuState* state = cpuState_.get();
+    if (bcoreMemory_->MMIOAccessCount() != mmioBefore) return BarrierMmio;
+    const u32 ipend = cec_mmr_read(state, CEC_MMR_BASE + 8);
+    const u32 ilat = cec_mmr_read(state, CEC_MMR_BASE + 12);
+    if (ipend != ipendBefore || ilat != ilatBefore) return BarrierInterruptChange;
+    if (ilat & cec_mmr_read(state, CEC_MMR_BASE + 4)) return BarrierInterruptPending;
+    if (guestCoreTimer_->Expiries() != expiriesBefore) return BarrierGuestDeadline;
+    if (pll_->NextDeadlineTicks()) return BarrierPllCountdown;
+    // The GP timer tick in the pass uses this block's host-time sample.
+    if (gpTimerTickDue && !gptimer->TicksAreNoOp()) return BarrierDeviceWork;
+    if (eventsPending_.load(std::memory_order_acquire)) return BarrierQueuedEvents;
+    if (!batchStopPCs_.empty() &&
+        std::find(batchStopPCs_.begin(), batchStopPCs_.end(), state->pc) != batchStopPCs_.end())
+        return BarrierStopPC;
+    const auto now = HostNow(hostClock_);
+    if (batchLength_ == 0) {
+        // First skip in this Run(): the full per-device proof.
+        if (!AllDevicesServiceNoOp(now)) return BarrierDeviceWork;
+    } else {
+        // Later skips: since the full proof, only MMR writes (ended the batch
+        // above), the pass itself (not run), guest time (DMA/SPORT due), host
+        // threads (USB host requests) and host time (RTC) can change a device
+        // answer. Re-check exactly those.
+        if (!dma->ServiceIsNoOp() || static_cast<const USB&>(*usb).HostWorkPending() || !rtc_->StatUnchangedAt(now))
+            return BarrierDeviceWork;
+        if (multiBlockCrossCheck_) {
+            ++multiBlockStats_.crossChecks;
+            if (!AllDevicesServiceNoOp(now)) {
+                if (multiBlockStats_.crossCheckFailures++ == 0) {
+                    std::string work;
+                    for (const auto& device : devices)
+                        if (device.get() != rtc_.get() && !device->ServiceIsNoOp()) work += " " + device->Name();
+                    if (!rtc_->ServiceIsNoOpAt(now)) work += " RTC";
+                    multiBlockStats_.firstCrossCheckFailure = work;
+                    LogWarn("multi-block cross-check: incremental proof missed device work at pc=%08X:%s", state->pc,
+                            work.c_str());
+                }
+                return BarrierCrossCheck;
+            }
+        }
+    }
+    batchHostTime_ = now;
+    batchHostTimeValid_ = true;
+    return 0;
+}
+
+bool BlackFinCpu::AllDevicesServiceNoOp(std::chrono::system_clock::time_point now) {
+    for (const auto& device : devices) {
+        if (device.get() == rtc_.get() ? !rtc_->ServiceIsNoOpAt(now) : !device->ServiceIsNoOp()) return false;
+    }
+    return true;
+}
+
+void BlackFinCpu::LogMultiBlockStats() {
+    const auto& s = multiBlockStats_;
+    std::string ends;
+    static const char* const names[kBatchEndCount] = {"mmio", "irq-change", "irq-pending", "idle", "deadline", "pll",
+                                                      "device-work", "queued", "tracing", "budget", "stop-pc",
+                                                      "cross-check"};
+    for (unsigned i = 0; i < kBatchEndCount; ++i)
+        if (s.ends[i]) ends += std::string(" ") + names[i] + "=" + std::to_string(s.ends[i]);
+    LogInfo("multiblock runs=%llu blocks=%llu skipped=%llu cross-checks=%llu cross-check-failures=%llu ends:%s",
+            static_cast<unsigned long long>(s.runs), static_cast<unsigned long long>(s.blocks),
+            static_cast<unsigned long long>(s.skippedPasses), static_cast<unsigned long long>(s.crossChecks),
+            static_cast<unsigned long long>(s.crossCheckFailures), ends.c_str());
+}
+
 void BlackFinCpu::SetMMIOLog(std::vector<MMIOAccess>* log) { bcoreMemory_->SetMMIOLog(log); }
 
 // Conditions under which the service pass after this block could not be
@@ -968,6 +1111,7 @@ const ShadowTiming* BlackFinCpu::ShadowTimingStats() const {
 void BlackFinCpu::QueueEvent(const std::function<void()>& event, std::chrono::nanoseconds delay) {
     std::unique_lock<std::recursive_mutex> lock(eventQueueMutex);
     eventQueue.push_back({delay, event});
+    eventsPending_.store(true, std::memory_order_release);
 }
 
 // cec_raise() returns without latching while did_jump is set, and a dispatch
@@ -986,6 +1130,7 @@ void BlackFinCpu::QueueInterruptRaise(int ivg) {
     std::unique_lock<std::recursive_mutex> lock(eventQueueMutex);
     ++raiseStats_.requested;
     if (ivg >= 0 && ivg < 32) requestedRaises_ |= 1u << ivg;
+    eventsPending_.store(true, std::memory_order_release);
 }
 
 // Latch each requested IVG into ILAT, except an IVG being serviced: the CEC
@@ -1048,6 +1193,7 @@ void BlackFinCpu::ProcessEvents() {
         }
     }
     elapsedTime += instructionTime;
+    eventsPending_.store(!eventQueue.empty() || requestedRaises_ != 0, std::memory_order_release);
 }
 
 void BlackFinCpu::AttachDisplay(const std::shared_ptr<Display>& display) {

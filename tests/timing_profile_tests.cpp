@@ -107,6 +107,24 @@ void InvalidValuesRejected() {
     Check(Rejects({{"OP1EMU_GUEST_CLOCK_COST", "fast"}}), "unknown cost model rejected");
 }
 
+// Multi-block execution (docs/multiblock-execution.md): functional guest clock only, off by default.
+void MultiBlockSwitch() {
+    Check(!Resolve({{"OP1EMU_PROFILE", "functional"}}).multiBlock, "multi-block is off by default");
+    const auto on = Resolve({{"OP1EMU_PROFILE", "functional"}, {"OP1EMU_EXPERIMENTAL_MULTIBLOCK", "1"}});
+    Check(on.multiBlock && !on.multiBlockCrossCheck && on.assumptions.back().rfind("EXPERIMENTAL: multi-block", 0) == 0,
+          "functional profile accepts multi-block and lists it");
+    const auto cross = Resolve({{"OP1EMU_PROFILE", "functional"}, {"OP1EMU_EXPERIMENTAL_MULTIBLOCK", "crosscheck"}});
+    Check(cross.multiBlock && cross.multiBlockCrossCheck, "crosscheck enables multi-block with full re-checks");
+    Check(!Resolve({{"OP1EMU_PROFILE", "strict"}, {"OP1EMU_EXPERIMENTAL_MULTIBLOCK", "0"}}).multiBlock, "0 keeps it off");
+    Check(Rejects({{"OP1EMU_PROFILE", "strict"}, {"OP1EMU_EXPERIMENTAL_MULTIBLOCK", "1"}}), "strict rejects multi-block");
+    Check(Rejects({{"OP1EMU_EXPERIMENTAL_MULTIBLOCK", "1"}}), "unset profile rejects multi-block");
+    Check(Rejects({{"OP1EMU_EXPERIMENTAL_GUEST_CLOCK", "1"}, {"OP1EMU_EXPERIMENTAL_MULTIBLOCK", "1"}}),
+          "guest clock without the functional profile rejects multi-block");
+    Check(Rejects({{"OP1EMU_PROFILE", "functional"}, {"OP1EMU_EXPERIMENTAL_GUEST_CLOCK", "0"},
+                   {"OP1EMU_EXPERIMENTAL_MULTIBLOCK", "1"}}), "functional without the guest clock rejects multi-block");
+    Check(Rejects({{"OP1EMU_PROFILE", "functional"}, {"OP1EMU_EXPERIMENTAL_MULTIBLOCK", "yes"}}), "invalid value rejected");
+}
+
 class ScopedEnv {
 public:
     ScopedEnv(const char* name, const char* value) : name_(name) {
@@ -189,6 +207,7 @@ int main() {
     StrictRejectsProvisionalAssumptions();
     FunctionalEnablesKnownGoodBootAssumptions();
     InvalidValuesRejected();
+    MultiBlockSwitch();
     CpuDefaultUnchanged();
     CpuStrict();
     CpuFunctional();

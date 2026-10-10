@@ -18,10 +18,11 @@ with the local evidence (`performance-profile/multiblock-design/REPORT.md`).
 | Milestone | State |
 | --- | --- |
 | M0: passive eligibility queries and state comparison | Implemented. Diagnostic only. |
-| M1: quiet-block batching | Not started. |
+| M1: quiet-block batching | Implemented. EXPERIMENTAL and opt-in (`OP1EMU_EXPERIMENTAL_MULTIBLOCK=1`); off by default. |
 
 M0 does not change when devices are serviced or how guest time advances.
 With diagnostics off, the only additions to `Run()` are two flag tests.
+M1 is described in the "M1" sections below.
 
 ## Device eligibility: `Device::ServiceIsNoOp()`
 
@@ -167,13 +168,244 @@ verification.
 noise. A first version that kept the diagnostic code inline in `Run()` cost
 about 3%.
 
+## M1: batched execution
+
+### Switch
+
+- **`OP1EMU_EXPERIMENTAL_MULTIBLOCK=1`:** accepted only with
+  `OP1EMU_PROFILE=functional` and the guest clock. Strict and unset profiles
+  reject it, as does a guest clock without the functional profile. It is
+  listed among the active timing assumptions.
+- **`OP1EMU_EXPERIMENTAL_MULTIBLOCK=crosscheck`:** also re-derives every
+  incremental proof in full. A disagreement is counted, the first one is
+  logged, and the pass is run. This is for validation.
+- **Exclusions:** M1 cannot be combined with `OP1EMU_BATCH_DIAG`. Per-block
+  tracing (`OP1EMU_TRACE_CPU=1`) ends every batch.
+- **bcore:** unchanged.
+
+### Architecture
+
+`Run()` loops over `RunBlock()`, which is the former `Run()` body,
+unchanged except for one decision point:
+- `RunBlock()` executes one cached block with its full per-block prologue
+  and bookkeeping: CYCLES, the entry-point invalidation, PLL and ratio
+  checks, packet and shadow accounting, the guest clock and the core-timer
+  `Sync()`, then the IDLE check and `cec_check_pending()`.
+- **Decision point:** after `cec_check_pending()` and before the device loop,
+  `BatchContinueBarrier()` decides whether the rest of the pass may be
+  skipped. The rest is the device loop, GP timer tick, `ProcessEvents()` and
+  the SIC re-pend at RTI.
+- **Skipped:** `RunBlock()` returns and `Run()` runs the next block.
+  Otherwise the pass runs and `Run()` returns. Per guest block, the order of
+  execution, guest-clock advance, core-timer sync, interrupt check, device
+  processing, event processing and SIC re-pend is the order without
+  batching; skipped passes are simply absent.
+- **Batching off:** `Run()` executes exactly one block and its pass.
+
+**MMIO is synchronous.** Every guest MMR access reaches the device's
+`Read32`/`Write32` at the exact instruction (bcore → `EmulatorMemory` →
+`Emulator`). A DMA start, SIC level change or NAND command therefore takes
+effect inside the block. Effects that wait for the pass (DMA progress, NFC
+completions, TWI progress) are why a block with any MMIO always gets its
+pass before the next block runs.
+
+### What ends a batch
+
+The checks run in this order. Any one of them runs the pass and returns
+from `Run()`:
+
+| Check | End reason |
+| --- | --- |
+| 64 blocks executed in this `Run()` (`kMaxBatchBlocks`) | budget |
+| Per-block tracing | tracing |
+| Any MMR access (`0xFFC00000` and up) during the block | MMIO |
+| IPEND or ILAT changed (dispatch, RTI, raise, latch) | interrupt change |
+| `ILAT & IMASK` non-zero | interrupt pending |
+| Core-timer expiry during the block | guest deadline |
+| PLL lock or awake-bypass countdown outstanding | PLL |
+| GP timer tick due on this block's host-time sample with a timer running | device work |
+| Queued events or SIC latch requests (`eventsPending_`, set on every push) | queued events |
+| Next PC registered by the caller (`AddBatchStopPC`) | stop PC |
+| Device proof failed (below) | device work |
+
+IDLE never batches: `RunBlock()` services IDLE and returns before the
+decision point.
+
+**Device proof:**
+- **First skip in a `Run()`:** `ServiceIsNoOp()` for every device, all at
+  one host instant.
+- **Later skips:** only what can change without ending the batch:
+  - DMA (SPORT readiness follows guest time);
+  - USB host-thread work (`HostWorkPending()`, set by every host request);
+  - the RTC's host-time `STAT` at the decision instant.
+- **Other device state** changes only through MMR writes (which end the
+  batch), the pass itself (not run), or events (which end the batch).
+  `crosscheck` verifies this claim.
+
+### Host-time boundary policy
+
+Host-time sources are RTC, CYCLES, GP timer ticks, panel TE, USB host and
+input events. They are TEMPORARY host-time behaviour, nondeterministic
+with or without batching.
+
+**The M0 RTC mismatch.** M0 sampled host time twice: once for the
+eligibility query, and again when the pass ran. A minute boundary fell
+between the two samples. M1 samples host time once per skipped pass, at the
+decision point, and uses that instant both as the instant of the skipped
+pass and as the next block's host time (CYCLES, the GP timer sample, RTC).
+A skipped pass is therefore exactly a pass run at that instant. No guest
+code runs between the two, and a block without MMIO reads no host time.
+The RTC change is seen at the next decision point, at most one block later
+in host time, where it ends the batch.
+
+| Source | Policy |
+| --- | --- |
+| RTC | Exact proof at the decision instant (`StatUnchangedAt`). A new second or minute ends the batch on the next block boundary. |
+| CYCLES | Updated every block, as before, from the block's host time. |
+| GP timer ticks | The tick condition is this block's host-time sample, as before. A due tick with a running timer ends the batch. |
+| Panel TE, input, frontend events | Delivered as queued events. A push from any thread sets `eventsPending_`, and the next decision point sees it. Delayed events (TE's 1000-pass edge) keep every pass until they run. |
+| USB host (usbipd thread) | Every host request sets `workPending`. The next decision point sees it. |
+| Work between `Run()` calls (frontend polling, sensors, runtime bound) | Waits for at most one batch (≤ 64 blocks, a few µs to tens of µs of host time). This is the only added latency, and it applies to host-time inputs only. |
+
+**Classification.** A late host event lands at the next block boundary,
+exactly as if it had arrived after that pass. This is LIKELY equivalent to
+some unbatched host timeline, not proven equal to any particular run. Host
+time is not deterministic in either mode.
+
+**Speed.** Host-time sources fire at the same rate per host second with
+batching on. Because the guest runs faster, they fire less often per guest
+second: the panel TE stays at 62.4 per host second. That is the existing
+host-time behaviour, not a new semantic.
+
+### Deterministic equivalence
+
+`tests/multiblock_execution_tests.cpp` uses an injected host clock: host
+time is a function of guest CLKIN time. Each scenario runs three times from
+the same start:
+- unbatched;
+- batched with `crosscheck`;
+- batched plain.
+
+**What must match** after every guest block: the complete captured state
+(as in M0, plus GP timers), a per-scenario memory hash where relevant, the
+MMIO sequence, and the final guest memory. No cross-check may disagree.
+
+Inputs are injected at the same block in every run, through the paths real
+host inputs use: queued events, USB host requests and SIC pins.
+
+**Scenarios, all identical:**
+- quiet loop;
+- hardware loop with exit and re-arm;
+- memory stores in a loop;
+- MMIO every block;
+- MMIO between loops;
+- core-timer expiry with an ISR;
+- nested interrupts (`[--SP] = RETI`);
+- SPORT DMA words and rows;
+- core timer plus SPORT deadlines;
+- NAND/NFC completions;
+- TWI master transfer;
+- GP timer host-time ticks;
+- RTC second and minute rollover;
+- USB host requests (SETUP, OUT, IN);
+- queued events (TE-like delay);
+- IDLE with a core-timer wake;
+- PLL same-value bypass countdown.
+
+**Further checks:** a stop-PC scenario (every arrival returns to the
+caller), and a profile gate (strict and unset refuse, off by default,
+exclusive with M0 diagnostics).
+
+**Mutation checks** remove one check at a time (evidence kept locally):
+
+| Removed check | Plain batching diverges | Caught by cross-check | Caught by scenario expectation |
+| --- | --- | --- | --- |
+| RTC host-time check | yes | yes | — |
+| DMA re-check | yes | yes | — |
+| Events flag | yes | yes | — |
+| GP timer tick | yes | yes | — |
+| First full proof | yes | yes | — |
+| USB host check | no | yes | — |
+| MMIO barrier | no | — | yes |
+| IPEND/ILAT barrier | no | — | yes |
+| Expiry barrier | no | — | yes |
+| PLL barrier | no | — | yes |
+
+**USB:** the host handlers apply their effects synchronously, so no
+scenario shows a visible effect of a delayed USB pass. The check stays.
+
+**`InterruptPending`:** removing it changed nothing, because
+`cec_check_pending()` has already run and the skipped part of the pass does
+not read a blocked pending interrupt. It stays, as M1 requires, and ends
+5.6% of passes in the firmware.
+
+### Firmware (v241 functional, same script and binary, OFF / ON / crosscheck)
+
+Each run covers boot, UI, play, stop and a held note. Rates come from a
+scratch-only instrumented copy (evidence kept locally).
+
+**All runs:**
+- **Script:** completed in every run, with no unsupported stop or assertion.
+- **Screenshots:** the tape UI, play, stop and held note match. The tape
+  counter is further along with batching on, because more guest time
+  passes per host second.
+- **Cross-check:** 359.7M incremental proofs re-derived in full, 0
+  disagreements.
+
+| Per phase | OFF | ON |
+| --- | --- | --- |
+| Blocks per host second | 1.20–1.25M | 2.15–2.22M (1.76–1.84×) |
+| Guest seconds per host second | 0.048–0.073 | 0.110–0.164 (2.25–2.56×) |
+| Host dispatches per block | 1.0 | 0.115–0.150 (average batch 6.7–8.7) |
+| Device passes skipped | 0 | 85.1–88.5% |
+| SPORT TX/RX words per guest second | 88,200 / 88,200 | 88,200 / 88,200 |
+| IRQ28 / IVG11 (SPORT TX DMA) per guest second | 689 | 689 |
+| IRQ20 / IVG10 per guest second | 579–658 | 579–658 |
+| Core timer / IVG6 per guest second | 1,000 | 1,000 |
+| Panel TE (IRQ41) per host second | 61.9–62.4 | 61.8–62.4 |
+
+**Guest seconds per host second** improves more than blocks per host
+second. That is mostly because host-time work, such as TE handling and
+redraws (IVG13), happens less often per guest second at higher speed, so the
+firmware runs fewer blocks per guest second.
+
+**NAND activity** (IRQ16/48, IVG9) is identical against guest time for the
+first 2 guest seconds of boot in all three runs. After that it tracks
+closely; the phase windows differ only because the script's host-time
+waits fall at different guest times.
+
+**Batch ends over the whole ON run** (687.9M blocks):
+
+| End reason | Share of blocks |
+| --- | --- |
+| Interrupt pending | 5.6% |
+| MMIO | 2.6% |
+| Device work | 2.0% |
+| Queued events | 1.9% |
+| Budget | 0.6% |
+| Interrupt change | 0.05% |
+
+**Overhead with batching off:** a full `Run()` on a 2-NOP hardware loop
+takes 422.2 vs 418.7 ns per block (median of 9 alternating runs), within
+noise. `RunBlock()` is inlined into `Run()`, and the host clock defaults to
+a direct `system_clock::now()`.
+
+**Batched, isolated benchmark:** 105 / 120 / 160 ns per block for a 1-, 2-
+and 10-instruction loop, against about 420 ns unbatched.
+
 ## Known limits
 
 - **Host-thread and host-time sources** (USB host, panel TE, input events,
-  RTC seconds): these can change state between the eligibility query and the
-  pass. The firmware verify run hit this once, on an RTC minute boundary. A firmware
-  `verify` mismatch from such a race is a latency question for M1's budget,
-  not a wrong proof.
+  RTC seconds): in M0 these can change state between the eligibility query
+  and the pass (one RTC minute boundary in the firmware verify run). M1
+  samples host time once per skipped pass; see "Host-time boundary policy".
+  Equivalence with batching on is exact only for deterministic inputs. For
+  host-time inputs it is LIKELY equivalent to some unbatched host timeline,
+  not proven.
+- **Caller work between `Run()` calls** (frontend polling, sensors) waits for
+  up to 64 blocks with batching on.
+- **Stop PCs:** callers that inspect `PC()` between `Run()` calls must
+  register those PCs (`AddBatchStopPC`). The headless and GUI DXE loaders do.
 - **Captured state is not exhaustive:** guest SDRAM/L1 writes by the CPU are
   not compared, because the pass does not run the CPU. Host-side device
   internals are compared only through registers and counters.

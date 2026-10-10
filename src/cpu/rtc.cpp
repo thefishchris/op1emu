@@ -10,7 +10,7 @@ RTC::RTC(u32 baseAddr) : RegisterDevice("RTC", baseAddr, 0x18) {
     FIELD(RTC_STAT, RTC_STAT, 0, 32, R(GetCurrentStat()), [this](u32 v) {
         writePending = true;
         statShadow = v;
-        baseTime = std::chrono::system_clock::now();
+        baseTime = HostNow(hostClock_);
         lastStat = statShadow;
     });
 
@@ -86,8 +86,16 @@ static std::chrono::system_clock::time_point BlackfinToTime(u32 rtcBfin) {
 }
 
 u32 RTC::GetCurrentStat() {
-    auto now = std::chrono::system_clock::now();
+    return StatAt(HostNow(hostClock_));
+}
+
+u32 RTC::StatAt(std::chrono::system_clock::time_point now) const {
     return TimeToBlackfin(now - baseTime + BlackfinToTime(statShadow));
+}
+
+void RTC::SetHostClock(HostClockFn clock) {
+    hostClock_ = clock;
+    lastStat = GetCurrentStat();
 }
 
 int RTC::InterruptLevel() {
@@ -106,7 +114,15 @@ void RTC::UpdateInterrupts() {
 // with the same value) and the interrupt level it would drive is the level
 // already driven.
 bool RTC::ServiceIsNoOp() {
-    return !writePending && GetCurrentStat() == lastStat && drivenLevel == InterruptLevel();
+    return ServiceIsNoOpAt(HostNow(hostClock_));
+}
+
+bool RTC::ServiceIsNoOpAt(std::chrono::system_clock::time_point now) {
+    return !writePending && StatUnchangedAt(now) && drivenLevel == InterruptLevel();
+}
+
+bool RTC::StatUnchangedAt(std::chrono::system_clock::time_point now) {
+    return StatAt(now) == lastStat;
 }
 
 void RTC::Tick() {
