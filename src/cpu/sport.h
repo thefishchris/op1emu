@@ -9,12 +9,30 @@
 #include <chrono>
 #include <cstdint>
 
+// SPORT_TCR2 / SPORT_RCR2 frame settings (BF52x HRM figures 24-26 and 24-28):
+// SLEN[4:0] = word length - 1; bit 8 TXSE/RXSE (secondary side enable);
+// bit 9 TSFSE/RSFSE (frame sync becomes the L/R clock: two words per frame);
+// bit 10 TRFST/RRFST (right channel first).
+struct SportConfig2 {
+    int wordBits;
+    bool secondary;
+    bool stereo;
+    bool rightFirst;
+    int Channels() const { return stereo ? 2 : 1; }
+};
+
+SportConfig2 DecodeSportConfig2(u32 value);
+
 class SPORT : public RegisterDevice, public DMABus {
 public:
     using AudioOutputCallback = std::function<void(const void* data, size_t samples, int channels, int bitsPerSample)>;
     using AudioInputCallback = std::function<size_t(void* data, size_t samples, int channels, int bitsPerSample)>;
 
     SPORT(u32 baseAddr, int sportNum);
+
+    // Decoded TCR2 / RCR2 frame settings.
+    SportConfig2 TransmitConfig2() const;
+    SportConfig2 ReceiveConfig2() const;
 
     // DMABus interface
     u32 DMARead(int x, int y, void* dest, u32 length) override;

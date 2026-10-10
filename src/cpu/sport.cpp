@@ -25,8 +25,9 @@ SPORT::SPORT(u32 baseAddr, int sportNum)
     FIELD(SPORT_TCR2, SLEN, 0, 5, R(transmitWordLength - 1), [this](u32 v) {
         transmitWordLength = v + 1;
     });
-    FIELD(SPORT_TCR2, TSFSE, 8, 1, R(transmitStereoFrameSync), W(transmitStereoFrameSync));
-    FIELD(SPORT_TCR2, TXSE, 9, 1, R(transmitSecondaryEnabled), W(transmitSecondaryEnabled));
+    // BF52x HRM figure 24-26: TXSE bit 8, TSFSE bit 9, TRFST bit 10.
+    FIELD(SPORT_TCR2, TXSE, 8, 1, R(transmitSecondaryEnabled), W(transmitSecondaryEnabled));
+    FIELD(SPORT_TCR2, TSFSE, 9, 1, R(transmitStereoFrameSync), W(transmitStereoFrameSync));
     FIELD(SPORT_TCR2, TRFST, 10, 1, R(transmitRightStereoOrderFirst), W(transmitRightStereoOrderFirst));
 
     REG32(SPORT_TX, 0x10);
@@ -63,8 +64,9 @@ SPORT::SPORT(u32 baseAddr, int sportNum)
     FIELD(SPORT_RCR2, SLEN, 0, 5, R(receiveWordLength - 1), [this](u32 v) {
         receiveWordLength = v + 1;
     });
-    FIELD(SPORT_RCR2, RSFSE, 8, 1, R(receiveStereoFrameSync), W(receiveStereoFrameSync));
-    FIELD(SPORT_RCR2, RXSE, 9, 1, R(receiveSecondaryEnabled), W(receiveSecondaryEnabled));
+    // BF52x HRM figure 24-28: RXSE bit 8, RSFSE bit 9, RRFST bit 10.
+    FIELD(SPORT_RCR2, RXSE, 8, 1, R(receiveSecondaryEnabled), W(receiveSecondaryEnabled));
+    FIELD(SPORT_RCR2, RSFSE, 9, 1, R(receiveStereoFrameSync), W(receiveStereoFrameSync));
     FIELD(SPORT_RCR2, RRFST, 10, 1, R(receiveRightStereoOrderFirst), W(receiveRightStereoOrderFirst));
 
     REG32(SPORT_STAT, 0x30);
@@ -107,8 +109,11 @@ u32 SPORT::DMARead(int x, int y, void* dest, u32 length)
     int channels = receiveStereoFrameSync ? 2 : 1;
     int bitsPerSample = receiveWordLength;
     int frameSize = wordSize * channels;
-    size_t requestedSamples = length / frameSize;
-    if (requestedSamples == 0) return 0;
+    // Pacing counts SPORT words, as before stereo frame sync was decoded, so the
+    // DMA word and interrupt cadence is unchanged; only whole L/R frames move.
+    // Frame-based pacing is deferred to the SPORT clock work.
+    size_t requestedSamples = length / static_cast<size_t>(wordSize);
+    if (requestedSamples < static_cast<size_t>(channels)) return 0;
 
     // Start timing on first DMA call after SPORT enable
     if (!dmaRxActive_) {
@@ -127,17 +132,19 @@ u32 SPORT::DMARead(int x, int y, void* dest, u32 length)
                          ? (totalDue - totalRxSamplesDelivered_) : 0;
 
     if (available > requestedSamples) available = requestedSamples;
+    available -= available % static_cast<uint64_t>(channels); // Whole frames only.
     if (available == 0) return 0;  // Not time yet — DMA retries next cycle
+    const uint64_t frames = available / static_cast<uint64_t>(channels);
 
     if (audioInputCallback) {
-        size_t read = audioInputCallback(dest, available, channels, bitsPerSample);
-        totalRxSamplesDelivered_ += read;
+        size_t read = audioInputCallback(dest, frames, channels, bitsPerSample);
+        totalRxSamplesDelivered_ += read * static_cast<size_t>(channels);
         return static_cast<u32>(read * frameSize);
     }
 
     // Fill with silence
     totalRxSamplesDelivered_ += available;
-    return static_cast<u32>(available * frameSize);
+    return static_cast<u32>(frames * static_cast<uint64_t>(frameSize));
 }
 
 u32 SPORT::DMAWrite(int x, int y, const void* source, u32 length)
@@ -150,8 +157,11 @@ u32 SPORT::DMAWrite(int x, int y, const void* source, u32 length)
     int channels = transmitStereoFrameSync ? 2 : 1;
     int bitsPerSample = transmitWordLength;
     int frameSize = wordSize * channels;
-    size_t requestedSamples = length / frameSize;
-    if (requestedSamples == 0) return 0;
+    // Pacing counts SPORT words, as before stereo frame sync was decoded, so the
+    // DMA word and interrupt cadence is unchanged; only whole L/R frames move.
+    // Frame-based pacing is deferred to the SPORT clock work.
+    size_t requestedSamples = length / static_cast<size_t>(wordSize);
+    if (requestedSamples < static_cast<size_t>(channels)) return 0;
 
     // Start timing on first DMA call after SPORT enable
     if (!dmaTxActive_) {
@@ -170,12 +180,27 @@ u32 SPORT::DMAWrite(int x, int y, const void* source, u32 length)
                          ? (totalDue - totalTxSamplesDelivered_) : 0;
 
     if (available > requestedSamples) available = requestedSamples;
+    available -= available % static_cast<uint64_t>(channels); // Whole frames only.
     if (available == 0) return 0;  // Not time yet — DMA retries next cycle
+    const uint64_t frames = available / static_cast<uint64_t>(channels);
 
     if (audioOutputCallback) {
-        audioOutputCallback(source, available, channels, bitsPerSample);
+        audioOutputCallback(source, frames, channels, bitsPerSample);
     }
 
     totalTxSamplesDelivered_ += available;
-    return static_cast<u32>(available * frameSize);
+    return static_cast<u32>(frames * static_cast<uint64_t>(frameSize));
+}
+
+SportConfig2 DecodeSportConfig2(u32 value) {
+    return SportConfig2{static_cast<int>(value & 0x1Fu) + 1, (value & 0x100u) != 0, (value & 0x200u) != 0,
+                        (value & 0x400u) != 0};
+}
+
+SportConfig2 SPORT::TransmitConfig2() const {
+    return SportConfig2{transmitWordLength, transmitSecondaryEnabled, transmitStereoFrameSync, transmitRightStereoOrderFirst};
+}
+
+SportConfig2 SPORT::ReceiveConfig2() const {
+    return SportConfig2{receiveWordLength, receiveSecondaryEnabled, receiveStereoFrameSync, receiveRightStereoOrderFirst};
 }
