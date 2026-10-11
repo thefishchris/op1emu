@@ -74,7 +74,8 @@ The build produces:
 - `build/op1emu-headless`: the scriptable runner without a window or audio;
 - `build/provision_yaffs`: the NAND provisioning tool.
 
-The test suite needs no firmware.
+The test suite needs no firmware. The same build and tests run in GitHub
+Actions; see [continuous integration](docs/ci.md).
 
 ## Inputs
 
@@ -183,6 +184,7 @@ The full register of hacks, assumptions and limitations is
 - [Emulator profiles](docs/emulator-profiles.md)
 - [Headless regression runner](docs/headless-regression.md)
 - [Temporary hacks, assumptions and limitations](docs/hacks.md)
+- [Continuous integration](docs/ci.md)
 
 **Device data and tools:**
 - [Boot ROM image](docs/boot-rom.md)

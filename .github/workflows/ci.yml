@@ -1,0 +1,87 @@
+# Public CI: build the GUI and headless runner and run the public CTest suite.
+# Needs no firmware, NAND, OTP or boot ROM. Toolchain and version notes: docs/ci.md.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: ['development/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build-and-test:
+    name: Build and test (Ubuntu 24.04, LLVM 15)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      LLVM_DIR: /usr/lib/llvm-15/lib/cmake/llvm
+      EXPECTED_LLVM_VERSION: '15.0.7'
+      EXPECTED_TEST_COUNT: '28'
+      BCORE_URL: https://github.com/thefishchris/bcore.git
+    steps:
+      - name: Check out the repository and the Bcore submodule
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Verify the Bcore submodule pin
+        run: |
+          pinned=$(git ls-tree HEAD ext/bcore | awk '{print $3}')
+          checked_out=$(git -C ext/bcore rev-parse HEAD)
+          url=$(git config -f .gitmodules submodule.ext/bcore.url)
+          echo "pinned=$pinned checked_out=$checked_out url=$url"
+          test -n "$pinned"
+          test "$pinned" = "$checked_out"
+          test "$url" = "$BCORE_URL"
+          test "$(git config -f .gitmodules --get-regexp '^submodule\..*\.path$' | wc -l)" -eq 1
+
+      - name: Install the toolchain and build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ca-certificates git cmake ninja-build g++ python3 \
+            llvm-15-dev \
+            libgl-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev
+
+      - name: Record tool versions
+        run: |
+          . /etc/os-release && echo "OS: $PRETTY_NAME"
+          llvm_version=$(/usr/lib/llvm-15/bin/llvm-config --version)
+          echo "LLVM: $llvm_version"
+          test "$llvm_version" = "$EXPECTED_LLVM_VERSION"
+          g++ --version | head -n 1
+          cmake --version | head -n 1
+          echo "Ninja: $(ninja --version)"
+          python3 --version
+          dpkg-query -W -f='${Package} ${Version}\n' llvm-15-dev g++ cmake ninja-build python3 libgl-dev libx11-dev
+
+      - name: Configure
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_DIR="$LLVM_DIR"
+
+      - name: Build the GUI, the headless runner and the tests
+        run: |
+          cmake --build build
+          test -x build/op1emu
+          test -x build/op1emu-headless
+
+      - name: Check the registered test count
+        run: |
+          count=$(ctest --test-dir build -N | awk '/^Total Tests:/{print $3}')
+          echo "registered tests: $count (expected $EXPECTED_TEST_COUNT)"
+          test "$count" = "$EXPECTED_TEST_COUNT"
+
+      - name: Run the public test suite
+        run: ctest --test-dir build --output-on-failure
