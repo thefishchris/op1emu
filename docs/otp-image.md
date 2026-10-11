@@ -69,4 +69,51 @@ points `OP1EMU_OTP_FILE` at the copy, so the source image is never modified.
 - these are rejected without being created or changed: a missing path, an
   empty path, a directory, and images of 0, 16, 8191, 8193 and 16384 bytes;
 - the default still creates an erased 8,192-byte image;
-- the CPU honours, rejects and ignores the variable correctly.
+- the CPU honours, rejects and ignores the variable correctly;
+- `OTP::CalculateEcc` matches the importer's ECC vectors.
+
+## Making an image from a textual dump
+
+`tools/import_otp_dump.py` converts a sparse textual OTP listing into an
+image. The listing is in the format of `TE-OP-1-BF524-OTP-dump.txt` in the
+public Tolsi/op1dumps repository. The source, the base and the output are
+all device data; keep them local.
+
+```sh
+python3 tools/import_otp_dump.py DUMP.txt NEW.otp --base BASE.otp \
+    [--override-page PAGE:LOW64:HIGH64 ...]
+```
+
+**Input lines:**
+- `0xPAGE LOW64 HIGH64`: exactly 16 hex digits per word. The first word
+  becomes bytes 0–7 of the page and the second bytes 8–15, each
+  little-endian. This word order is LIKELY: it follows the source's
+  description, and v241 accepted the result.
+- `0xPAGE 00`: an all-zero page.
+- A leading `!` is accepted and ignored. Its meaning in the source is
+  UNKNOWN.
+- `...` lines and blank lines are skipped.
+
+**Rejected:** any other line, duplicate pages, pages ≥ `0x200`, entries on
+the ECC storage pages, and text over 64 KiB. The error gives the line
+number. Nothing is silently corrected.
+
+**Overrides:** `--override-page` replaces a malformed source entry
+explicitly. It may only name a page that the source lists.
+
+**Base and output:**
+- `--base` must be an existing 8,192-byte image. Every page the dump does not
+  list is copied from it unchanged. Each imported page gets its ECC entry in
+  the emulator's encoding (see the table above); the importer mirrors
+  `OTP::CalculateEcc`, and both tests check the same vectors.
+- The output must not exist yet. A failed import leaves no output, and the
+  source and base are never modified.
+
+The result is only as good as the dump: full real-chip OTP behaviour is not
+implied.
+
+**Tests:** `otp_import_tests` cover, with synthetic data only:
+- parsing, malformed and truncated lines, overrides and ECC placement;
+- the command line: a valid import, a refused existing output, missing
+  inputs, truncated and oversized bases, cut-off and non-UTF-8 dumps, and
+  malformed overrides.

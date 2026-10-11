@@ -160,6 +160,22 @@ void DefaultStorageStillCreatesErasedImage(const fs::path& dir) {
     Check(fs::file_size(path) == kImageSize, "the default storage creates an 8192-byte image");
 }
 
+// tools/import_otp_dump.py mirrors CalculateEcc; otp_import_tests checks the same vectors.
+struct EccProbe : OTP {
+    using OTP::OTP;
+    u8 Ecc(u64 value) { return CalculateEcc(value); }
+};
+
+void EccMatchesImporterVectors(const fs::path& dir) {
+    EccProbe otp(0xFFC03600, (dir / "ecc.otp").string());
+    const struct { u64 value; u8 ecc; } vectors[] = {
+        {0, 0x00}, {1, 0x83}, {u64{1} << 63, 0xC7}, {~u64{0}, 0xFF}, {0x0123456789ABCDEFull, 0x9C},
+        {0x3546422D50534441ull, 0xDF}, // "ADSP-BF5", little-endian
+    };
+    for (const auto& vector : vectors)
+        Check(otp.Ecc(vector.value) == vector.ecc, "ECC of " + std::to_string(vector.value) + " matches the importer");
+}
+
 // The CPU selects the image from OP1EMU_OTP_FILE and otherwise keeps ./otp.bin.
 void CpuSelectsImageFromEnvironment(const fs::path& dir) {
     const auto workdir = dir / "cpu";
@@ -203,6 +219,7 @@ int main() {
     InvalidImagesAreRejected(dir);
     DefaultStorageStillCreatesErasedImage(dir);
     CpuSelectsImageFromEnvironment(dir);
+    EccMatchesImporterVectors(dir);
     fs::remove_all(dir);
     std::puts("otp storage tests passed");
     return 0;
