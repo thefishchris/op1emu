@@ -1,6 +1,7 @@
 #include "cqueue.h"
 #include <cqueue.hpp>
 #include <cstring>
+#include <cstdint>
 
 #define CQUEUE() (*(gto::cqueue<T>*)(q.get()))
 
