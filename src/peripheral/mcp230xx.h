@@ -56,7 +56,6 @@ protected:
     bool byteMode = false;
     bool intOutputOpenDrain = false;
     bool intActiveHigh = false;
-    bool intClearOnReadIntcap = false;
 
     std::function<void(int)> interruptCallback;
 };

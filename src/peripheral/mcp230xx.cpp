@@ -70,7 +70,9 @@ void MCP230XX::SwitchRegisterBank() {
         FIELD8(INTCON, INTCON, R(intCompareDef[bank]), W(intCompareDef[bank]));
 
         REG32(IOCON, REG_ADDR(MCP230XX_IOCON, bank));
-        FIELD(IOCON, INTCC, 0, 1, R(intClearOnReadIntcap ? 1 : 0), W(intClearOnReadIntcap));
+        // Bit 0 is unimplemented and reads 0 (MCP23017 DS20001952C register 3-6,
+        // MCP23008 DS21919E register 1-6).
+        FIELD(IOCON, RESERVED, 0, 1, R(0), N());
         FIELD(IOCON, INTPOL, 1, 1, R(intActiveHigh ? 1 : 0), W(intActiveHigh));
         FIELD(IOCON, ODR, 2, 1, R(intOutputOpenDrain ? 1 : 0), W(intOutputOpenDrain));
         FIELD(IOCON, SEQOP, 5, 1, R(byteMode ? 1 : 0), W(byteMode));
@@ -93,9 +95,8 @@ void MCP230XX::SwitchRegisterBank() {
         REG32(INTCAP, REG_ADDR(MCP230XX_INTCAP, bank));
         auto intcap_read_callback = [bank, this]() -> u32 {
             u8 val = intcap[bank];
-            if (intClearOnReadIntcap) {
-                ClearInterrupt(bank);
-            }
+            // Reading INTCAP or GPIO clears the port's interrupt (DS20001952C 3.6.4).
+            ClearInterrupt(bank);
             return val;
         };
         FIELD8(INTCAP, INTCAP, intcap_read_callback, N());
@@ -120,9 +121,7 @@ void MCP230XX::SwitchRegisterBank() {
                     }
                 }
             }
-            if (!intClearOnReadIntcap) {
-                ClearInterrupt(bank);
-            }
+            ClearInterrupt(bank);
             return level[bank] ^ ipol[bank];
         };
         FIELD8(GPIO, GPIO, gpio_read_callback, gpio_write_callback);
@@ -221,8 +220,9 @@ GPIOPinLevel MCP230XX::GetPinOutput(int pin) const {
             }
         }
         if (intOutputOpenDrain) {
-            // TODO: Open-drain output handling
-            return active ? GPIOPinLevel::High : GPIOPinLevel::Low;
+            // An active open-drain output sinks the line; released, it reads as
+            // pulled up. ODR overrides INTPOL (DS20001952C register 3-6).
+            return active ? GPIOPinLevel::Low : GPIOPinLevel::High;
         } else {
             if ((active && intActiveHigh) || (!active && !intActiveHigh)) {
                 return GPIOPinLevel::High;
