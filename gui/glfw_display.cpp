@@ -1,4 +1,5 @@
 #include "glfw_display.h"
+#include "canvas_mapping.h"
 #include <GL/gl.h>
 #include <cstring>
 #include <stdexcept>
@@ -294,6 +295,14 @@ void GLFWDisplay::MouseButtonCallback(GLFWwindow* window, int button, int action
 
 void GLFWDisplay::HandleMouseButton(int button, int action, double x, double y) {
     if (button != GLFW_MOUSE_BUTTON_LEFT) return;
+    // Rendering scales the fixed UI canvas to the current window viewport.
+    // Convert cursor coordinates back to that canvas for matching hitboxes.
+    int windowWidth = 0, windowHeight = 0;
+    glfwGetWindowSize(window_, &windowWidth, &windowHeight);
+    const auto canvas = CursorToCanvas(x, y, windowWidth, windowHeight, windowWidth_, windowHeight_);
+    if (!canvas) return;
+    x = canvas->x;
+    y = canvas->y;
 
     // Only handle press events for volume knob
     if (action == GLFW_PRESS) {
