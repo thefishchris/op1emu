@@ -39,3 +39,13 @@
 
 # debug information files
 *.dwo
+
+# Local builds, caches, firmware, and emulator storage
+/build*/
+__pycache__/
+*.op1
+*.ldr
+*.img
+*.BIN
+TE-OP-1-*.zip
+/otp.bin
