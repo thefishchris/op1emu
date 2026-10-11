@@ -108,6 +108,12 @@ target_link_libraries(emulator PRIVATE bfin-core spdlog::spdlog)
 add_executable(ldrdump tools/ldrdump.cpp)
 target_link_libraries(ldrdump emulator)
 
+add_executable(provision_yaffs tools/provision_yaffs.cpp src/cpu/nand_ecc.cpp)
+target_include_directories(provision_yaffs PRIVATE src)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(provision_yaffs PRIVATE -Wall -Wextra -Wpedantic -Wconversion -Wsign-conversion)
+endif()
+
 file(GLOB_RECURSE SOURCES gui/*.cpp)
 add_executable(op1emu ${SOURCES})
 target_link_libraries(op1emu PRIVATE emulator glfw OpenGL::GL nlohmann_json::nlohmann_json uvw ext Threads::Threads ${CMAKE_DL_LIBS})
@@ -252,6 +258,10 @@ if(BUILD_TESTING)
     find_package(Python3 COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
         add_test(NAME otp_import_tests COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/otp_import_tests.py)
+        # Writes 528 MiB NAND images, one at a time, under the build tree and removes them.
+        add_test(NAME provision_yaffs_tests COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/provision_yaffs_tests.py
+                 $<TARGET_FILE:provision_yaffs> ${CMAKE_CURRENT_BINARY_DIR})
+        set_tests_properties(provision_yaffs_tests PROPERTIES TIMEOUT 300)
         add_test(NAME ui_keymap_tests COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/ui_keymap_tests.py)
     endif()
 endif()
