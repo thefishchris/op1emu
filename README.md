@@ -187,6 +187,7 @@ The full register of hacks, assumptions and limitations is
 **Device data and tools:**
 - [Boot ROM image](docs/boot-rom.md)
 - [GUI artwork attribution](docs/artwork-attribution.md)
+- [Licensing](docs/licensing.md)
 - [OTP image and import tool](docs/otp-image.md)
 - [YAFFS provisioning tool](docs/yaffs-provisioning.md)
 - [NAND boot investigation](docs/nand-boot-investigation.md)
@@ -213,7 +214,9 @@ The full register of hacks, assumptions and limitations is
 
 - [op1emu](https://github.com/op1emu/op1emu): the upstream project this fork
   is based on.
-- [bcore](https://github.com/op1emu/bcore): the Blackfin CPU core.
+- [bcore](https://github.com/op1emu/bcore): the Blackfin CPU core, used through
+  the [thefishchris/bcore](https://github.com/thefishchris/bcore) fork, which
+  is distributed under GPL-3.0-or-later (see [Licensing](#licensing)).
 - [bfin_sim](https://github.com/op1emu/bfin_sim): a subset of the GNU Blackfin
   simulator. Bcore's own test suite uses its assembler tests; op1emu no longer
   depends on it.
@@ -221,3 +224,21 @@ The full register of hacks, assumptions and limitations is
   [op1kenobi](https://github.com/alexmandelshtam/op1kenobi) (both MIT): the GUI
   background `gui/ui.png` is a rendered and edited capture of that design. Licence
   notices and scope: [GUI artwork attribution](docs/artwork-attribution.md).
+
+## Licensing
+
+This repository's own files are under the MIT License ([LICENSE](LICENSE)),
+except the GUI artwork, which has its own terms
+([GUI artwork attribution](docs/artwork-attribution.md)).
+
+The programs built from it are **not** MIT-only. They include the Bcore CPU
+core, which is distributed under **GPL-3.0-or-later** because parts of it
+follow, and in places translate, GPL-licensed GNU Blackfin simulator
+sources. The built `op1emu` and `op1emu-headless` are therefore distributed
+under GPL-3.0-or-later. The GUI also compiles in cqueue (LGPL-3.0).
+Distributing binaries requires the licence texts and notices of every
+component and the complete Corresponding Source.
+
+[docs/licensing.md](docs/licensing.md) gives the details: the dependency
+licences, the obligations for source and binary distribution, and the open
+questions.
