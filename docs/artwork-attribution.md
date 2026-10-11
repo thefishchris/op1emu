@@ -98,7 +98,8 @@ SOFTWARE.
 
 ## Status
 
-These questions are open (see the project's release notes):
+These questions are open, and are also listed under
+[Open questions](licensing.md#open-questions) in the licensing document:
 - permission for the edited render;
 - Teenage Engineering's position.
 
