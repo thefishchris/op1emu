@@ -74,7 +74,12 @@ FetchContent_Declare(
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 set(BUILD_UVW_LIBS ON CACHE BOOL "" FORCE)
+# uvw's own test suite is controlled by its option(BUILD_TESTING). It is not
+# part of this project's tests, so shadow the option while uvw is configured:
+# its tests (and their googletest download) stay out of our CTest tree.
+set(BUILD_TESTING OFF)
 FetchContent_MakeAvailable(uvw)
+unset(BUILD_TESTING)
 message(STATUS "uvw fetched successfully")
 
 # Fetch miniaudio (single-header audio library)
@@ -125,6 +130,11 @@ target_link_libraries(op1emu-headless PRIVATE emulator nlohmann_json::nlohmann_j
 
 include(CTest)
 if(BUILD_TESTING)
+    # ext/bcore is added with EXCLUDE_FROM_ALL but registers tests that run its
+    # shift_edge_tests and emu programs; build them with the default target so
+    # those tests never run against missing executables.
+    add_custom_target(bcore_test_programs ALL)
+    add_dependencies(bcore_test_programs shift_edge_tests emu)
     add_executable(headless_tests tests/headless_tests.cpp gui/headless.cpp)
     target_include_directories(headless_tests PRIVATE gui)
     target_link_libraries(headless_tests PRIVATE emulator nlohmann_json::nlohmann_json Threads::Threads)
