@@ -4,7 +4,14 @@ An experimental emulator for the original Teenage Engineering OP-1 (Blackfin
 BF524), developed against firmware v241. It is not a complete OP-1, and it is
 not cycle accurate. It does not target the OP-1 Field.
 
+op1emu is an independent project. It is not affiliated with, endorsed by or
+sponsored by Teenage Engineering; "Teenage Engineering" and "OP-1" only
+identify the hardware it emulates.
+
 ![OP-1 Emulator Screenshot](screenshot.png)
+
+The GUI artwork and this screenshot are based on third-party designs; see
+[GUI artwork attribution](docs/artwork-attribution.md).
 
 This fork (`thefishchris/op1emu`) builds on the upstream
 [op1emu](https://github.com/op1emu/op1emu) project. It adds evidence-backed
@@ -179,6 +186,7 @@ The full register of hacks, assumptions and limitations is
 
 **Device data and tools:**
 - [Boot ROM image](docs/boot-rom.md)
+- [GUI artwork attribution](docs/artwork-attribution.md)
 - [OTP image and import tool](docs/otp-image.md)
 - [YAFFS provisioning tool](docs/yaffs-provisioning.md)
 - [NAND boot investigation](docs/nand-boot-investigation.md)
@@ -209,5 +217,7 @@ The full register of hacks, assumptions and limitations is
 - [bfin_sim](https://github.com/op1emu/bfin_sim): a subset of the GNU Blackfin
   simulator. Bcore's own test suite uses its assembler tests; op1emu no longer
   depends on it.
-- [op1kenobi](https://github.com/alexmandelshtam/op1kenobi): OP-1 screenshot
-  assets used for the GUI background.
+- Shunya Koide's HTML/CSS OP-1 design (CodePen) and Alex Ownejazayeri's
+  [op1kenobi](https://github.com/alexmandelshtam/op1kenobi) (both MIT): the GUI
+  background `gui/ui.png` is a rendered and edited capture of that design. Licence
+  notices and scope: [GUI artwork attribution](docs/artwork-attribution.md).
