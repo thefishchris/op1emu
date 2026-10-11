@@ -18,8 +18,8 @@ void Stop(int) { stopRequested.store(true); }
 }
 int RunHeadlessEmulator(int argc, char** argv) {
     try {
-        bool snapshot = true, stopOnIdle = false, options = true;
-        std::string script, config = "gui/ui.json", screenshot, profile;
+        bool snapshot = true, stopOnIdle = false, options = true, bootRomGiven = false;
+        std::string script, config = "gui/ui.json", screenshot, profile, bootRom;
         long limitMs = 0;
         std::vector<std::string> positional;
         auto value = [&](int& i) { if (++i == argc) throw std::runtime_error("Missing option argument"); return std::string(argv[i]); };
@@ -35,6 +35,7 @@ int RunHeadlessEmulator(int argc, char** argv) {
                 profile = value(i);
                 if (profile != "strict" && profile != "functional") throw std::runtime_error("--profile must be strict or functional");
             }
+            else if (options && argument == "--boot-rom") { bootRom = value(i); bootRomGiven = true; }
             else if (options && argument == "--screenshot-on-stop") screenshot = value(i);
             else if (options && argument == "--stop-on-unsupported-idle") stopOnIdle = true;
             else if (options && argument == "--max-runtime") {
@@ -44,6 +45,7 @@ int RunHeadlessEmulator(int argc, char** argv) {
             } else if (options && (argument == "--help" || argument == "-h")) {
                 std::cout << "Usage: op1emu-headless NAND [LDR] [--input-script PATH] [--ui-config PATH]\n"
                     "  --profile strict|functional (overrides OP1EMU_PROFILE; see docs/emulator-profiles.md)\n"
+                    "  --boot-rom PATH (32768-byte boot ROM image; overrides OP1EMU_BOOTROM_FILE; see docs/boot-rom.md)\n"
                     "  --nand-snapshot (default) | --nand-rw\n  --max-runtime MS | --stop-on-unsupported-idle | --screenshot-on-stop NEW.ppm\n"
                     "Commands: keys; press KEY; release KEY; tap KEY [MS]; wait MS; wait-frames N [MS];\n"
                     "  screenshot NEW.ppm; accel X Y Z; accel random; volume N; quit\n"; return 0;
@@ -60,7 +62,12 @@ int RunHeadlessEmulator(int argc, char** argv) {
         stopRequested.store(false); std::signal(SIGINT, Stop); std::signal(SIGTERM, Stop);
         // The CLI selection wins over OP1EMU_PROFILE; the CPU resolves it once.
         if (!profile.empty() && setenv("OP1EMU_PROFILE", profile.c_str(), 1) != 0) throw std::runtime_error("Cannot select profile");
+        // Likewise --boot-rom wins over OP1EMU_BOOTROM_FILE.
+        if (bootRomGiven && setenv("OP1EMU_BOOTROM_FILE", bootRom.c_str(), 1) != 0) throw std::runtime_error("Cannot select boot ROM");
         BlackFinCpu cpu;
+        if (positional.size() == 1 && !cpu.BootRomLoaded())
+            throw std::runtime_error("No boot ROM image: booting from NAND starts in the boot ROM. Use --boot-rom PATH or "
+                                     "OP1EMU_BOOTROM_FILE with a 32768-byte boot ROM image (docs/boot-rom.md)");
         cpu.AttachDisplay(frontend); cpu.AttachKeyboard(frontend); cpu.SetBootMode(0x0D);
         auto nand = std::make_shared<MT29F4G08>(cpu, positional[0], snapshot); cpu.AttachNandFlash(nand);
         LDRParser loader;

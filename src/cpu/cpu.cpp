@@ -210,7 +210,28 @@ BlackFinCpu::BlackFinCpu() : pc(0) {
     }
     // OP-1 seems only use last byte of DSPID, which is 0x02 for BF524 rev 02
     devices.emplace_back(std::make_shared<Jtag>(0xFFE05000, 0x02));
-    devices.emplace_back(std::make_shared<BootROM>(0xEF000000));
+    // The boot ROM is user-supplied (docs/boot-rom.md). Without an image the
+    // region is an explicit stub: any execution there or access to it stops.
+    if (const char* romPath = std::getenv("OP1EMU_BOOTROM_FILE")) {
+        BootRomImage image;
+        try {
+            image = LoadBootRomImage(romPath);
+        } catch (const std::runtime_error& error) {
+            throw std::runtime_error(std::string("OP1EMU_BOOTROM_FILE: ") + error.what());
+        }
+        bootRomLoaded_ = true;
+        bootRomValidated_ = image.validatedRevision;
+        if (image.validatedRevision)
+            LogInfo("Boot ROM: %s (validated revision, sha256 %s)", romPath, image.sha256.c_str());
+        else
+            LogWarn("Boot ROM: %s has sha256 %s, an unvalidated revision: firmware behaviour with it has not "
+                    "been validated (docs/boot-rom.md)", romPath, image.sha256.c_str());
+        devices.emplace_back(std::make_shared<BootROM>(kBootRomBase, std::move(image.bytes)));
+    } else {
+        devices.emplace_back(std::make_shared<AbsentBootROM>(kBootRomBase, [this](u32 address, bool write) {
+            ReportAbsentBootRom(address, write ? "write to" : "read from");
+        }));
+    }
     gptimer = std::make_shared<GPTimer>(0xFFC00600);
     for (int i = 0; i < 8; i++) {
         gptimer->BindInterrupt(i, IRQ_GPTIMER_0 + i, irqHandler);
@@ -408,6 +429,13 @@ void BlackFinCpu::SetHostClock(HostClockFn clock) {
 BlackFinCpu::~BlackFinCpu() {
 }
 
+void BlackFinCpu::ReportAbsentBootRom(u32 address, const char* access) {
+    if (!failed_.load(std::memory_order_acquire))
+        LogError("boot ROM not loaded: %s %08X (PC %08X). Set OP1EMU_BOOTROM_FILE to a %u-byte boot ROM image "
+                 "(docs/boot-rom.md)", access, address, cpuState_ ? cpuState_->pc : 0u, kBootRomSize);
+    failed_.store(true, std::memory_order_release);
+}
+
 void BlackFinCpu::ProcessInterrupt(int pin, int level) {
     sic->SetInterruptLevel(pin, level);
 }
@@ -433,6 +461,11 @@ static void SetBfinCycles(CpuState& cpu_state, u64 cycles) {
 // Inlined into Run(), its only caller.
 [[gnu::always_inline]] inline HaltReason BlackFinCpu::RunBlock() {
     if (Failed()) return HaltReason::Break;
+    // Never run absent ROM memory. Every block, batched or not, starts here.
+    if (!bootRomLoaded_ && cpuState_->pc - kBootRomBase < kBootRomSize) {
+        ReportAbsentBootRom(cpuState_->pc, "execution at");
+        return HaltReason::Break;
+    }
     if (unsupportedIdle_) return HaltReason::Break;
     if (cpuState_->idle) {
         ServiceIdle();

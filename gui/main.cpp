@@ -86,11 +86,9 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Create GLFW Display
-    auto display = std::make_shared<GLFWDisplay>();
-
     // Create BlackFin CPU. Construction rejects unusable configuration, such
-    // as an invalid OP1EMU_OTP_FILE image, with an explanatory exception.
+    // as an invalid OP1EMU_OTP_FILE or OP1EMU_BOOTROM_FILE image, with an
+    // explanatory exception. This happens before any window is opened.
     std::unique_ptr<BlackFinCpu> cpuStorage;
     try {
         cpuStorage = std::make_unique<BlackFinCpu>();
@@ -99,6 +97,15 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     BlackFinCpu& cpu = *cpuStorage;
+    // Without an LDR, execution starts at the boot ROM reset vector.
+    if (positional.size() == 1 && !cpu.BootRomLoaded()) {
+        LogError("No boot ROM image: booting from NAND starts in the boot ROM. Set OP1EMU_BOOTROM_FILE to a "
+                 "32768-byte boot ROM image (docs/boot-rom.md)");
+        return 1;
+    }
+
+    // Create GLFW Display
+    auto display = std::make_shared<GLFWDisplay>();
     cpu.AttachDisplay(display);
     cpu.AttachKeyboard(display);
     auto audioOutput = std::make_shared<MiniaudioOutput>();

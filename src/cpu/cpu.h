@@ -158,6 +158,10 @@ public:
     // Exact log of guest MMR accesses (nullptr stops logging).
     void SetMMIOLog(std::vector<MMIOAccess>* log);
     bool Failed() const { return failed_.load(std::memory_order_acquire); }
+    // Boot ROM image (docs/boot-rom.md): supplied through OP1EMU_BOOTROM_FILE.
+    // Without one, any execution in or access to the ROM region stops the CPU.
+    bool BootRomLoaded() const { return bootRomLoaded_; }
+    bool BootRomValidated() const { return bootRomValidated_; }
     BF524PLL& ClockState() { return *pll_; }
     struct AwakePLLStats { uint64_t consumed = 0, overshoot = 0, blocks = 0, expiries = 0; };
     const AwakePLLStats& AwakePLLExperimentStats() const { return awakePLLStats_; }
@@ -213,6 +217,7 @@ protected:
     void ProcessEvents();
     void ServiceIdle();
     void ReportUnsupportedIdle(const char* reason);
+    void ReportAbsentBootRom(u32 address, const char* access);
     void ReportHeldDomainIdle();
     enum class FunctionalIdleStep { None, Advanced, Stopped };
     // Functional profile only: advance architectural IDLE to the earliest
@@ -242,6 +247,8 @@ protected:
     uint64_t functionalIdleAdvances_ = 0;
     uint64_t functionalIdleWakes_ = 0;
     std::atomic<bool> failed_{false};
+    bool bootRomLoaded_ = false;
+    bool bootRomValidated_ = false;
     bool awakePLLExperiment_ = false;
     // PLL answers used at every block start, valid for pllVersionSeen_
     // (BF524PLL::StateVersion); refreshed whenever the PLL state changes.
