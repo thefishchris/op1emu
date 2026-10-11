@@ -2,6 +2,7 @@
 #include "miniaudio.h"
 #include "audio_output_miniaudio.h"
 #include "pcm_sample.h"
+#include "audio_ring.h"
 #include "utils/log.h"
 #include <cstring>
 #include <algorithm>
@@ -138,14 +139,8 @@ void MiniaudioOutput::WriteSamples(const void* data, size_t samples, int channel
         }
 
         // Push to ring buffer
-        ma_uint32 framesToWrite = static_cast<ma_uint32>(framesToProcess);
-        void* writeBuffer;
-        ma_result result = ma_pcm_rb_acquire_write(rb, &framesToWrite, &writeBuffer);
-        if (result == MA_SUCCESS && framesToWrite > 0) {
-            memcpy(writeBuffer, chunk, framesToWrite * CHANNELS * sizeof(float));
-            ma_pcm_rb_commit_write(rb, framesToWrite);
-        }
-        // If ring buffer is full, we drop samples (acceptable for emulator)
+        WriteAudioFrames(*rb, chunk, static_cast<ma_uint32>(framesToProcess), CHANNELS);
+        // A genuinely full ring drops samples (acceptable for emulator).
 
         framesRemaining -= framesToProcess;
         src += framesToProcess * srcStride;
