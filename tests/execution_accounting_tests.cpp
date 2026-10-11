@@ -2,15 +2,19 @@
 #include "cpu/cpu.h"
 #include "cpu/nand.h"
 #include "cpu/sic.h"
+#include "cpu/pll.h"
 #include "peripheral/MT29F4G08.h"
 #include "cec.h"
 #include "evt.h"
+#include "shadow_timing.h"
 #include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <limits>
+#include <optional>
+#include <string>
 #include <vector>
 
 namespace {
@@ -50,9 +54,11 @@ public:
 struct Fixture {
     CpuState cpu{};
     TestMemory memory;
+    ShadowTiming timing;
     Core core{&cpu, &memory};
-    Fixture() {
+    explicit Fixture(bool shadow = false) {
         cpu_state_init(&cpu);
+        if (shadow) cpu.shadow_timing = &timing;
         cpu.dpregs[8] = 0x200; // P0, default terminal branch target.
         cpu.dpregs[14] = 0xF00;
         cpu.ksp = 0xF00;
@@ -574,6 +580,343 @@ void CpuExposure() {
     Check(cpu.PacketEntryCount() == 2 && cpu.PC() == 0x102, "BlackFinCpu sees actual Bcore work");
     cpu.Run();
     Check(cpu.PacketEntryCount() == 3 && cpu.PC() == 0x102, "BlackFinCpu cached-block work");
+    cpu.GetEmulator().MemoryWrite16(0x110, 0x0020);
+    cpu.GetEmulator().MemoryWrite16(0x112, 0x2000); // JUMP +0, never issued by wake.
+    cpu.GetEmulator().MemoryWrite16(0xFFC00004, 5);
+    cpu.GetEmulator().MemoryWrite16(0xFFC00000, 0x2000);
+    cpu.SetPC(0x110);
+    cpu.Run();
+    Check(!cpu.IsIdle() && !cpu.UnsupportedIdle() && cpu.PC() == 0x112 &&
+          cpu.PacketEntryCount() == 4 && cpu.IdleEntryCount() == 1 &&
+          cpu.ClockState().ClkinTicks() == 512 && cpu.ClockState().ActiveCtl() == 0x2000,
+          "PLL deadline wakes reset-context CPU with masked CEC and no extra issue");
+    cpu.Run();
+    Check(cpu.PacketEntryCount() == 5, "post-IDLE packet executes only in subsequent run");
+    cpu.GetEmulator().MemoryWrite16(0x120, 0x0020);
+    cpu.SetPC(0x120);
+    cpu.Run();
+    Check(cpu.IsIdle() && cpu.UnsupportedIdle() && cpu.PacketEntryCount() == 6 &&
+          cpu.PC() == 0x122 && cpu.IdleEntryCount() == 2, "unknown wake is observable and CPU stays idle");
+    for (unsigned i = 0; i < 5; ++i) cpu.Run();
+    Check(cpu.PacketEntryCount() == 6 && cpu.IdleEntryCount() == 2, "unsupported idle never retries instruction");
+}
+
+void ShadowSequentialAndDisabled() {
+    for (bool enabled : {false, true}) {
+        Fixture f(enabled);
+        f.memory.write16(0x100, 0x0000);
+        f.memory.write16(0x102, 0xE180);
+        f.memory.write16(0x104, 7);
+        f.memory.write16(0x106, 0x0050);
+        f.cpu.cycles[0] = 1234;
+        f.Run(0x100);
+        Check(f.cpu.packet_entries == 3 && f.cpu.pc == 0x200 && f.cpu.dpregs[0] == 7 && f.cpu.cycles[0] == 1234,
+              "shadow enable does not change instruction results or CYCLES");
+        Check(f.timing.packets == (enabled ? 3u : 0u) && f.timing.EstimatedCycles() == (enabled ? 7u : 0u),
+              "one issue per packet plus four branch-loss cycles, or no shadow accounting");
+        if (enabled) Check(f.timing.known_issue_packets == 3 && f.timing.unknown_packets == 0, "known issue coverage");
+    }
+}
+
+void ShadowBranches() {
+    for (uint32_t testCC : {0u, 1u}) for (uint32_t predict : {0u, 1u}) for (uint32_t cc : {0u, 1u}) {
+        Fixture f(true);
+        f.cpu.cc = cc;
+        const uint16_t branch = static_cast<uint16_t>(0x1004u | (testCC << 11) | (predict << 10));
+        f.memory.write16(0x100, branch);
+        f.memory.write16(0x102, 0x0050);
+        f.Run(0x100);
+        const bool taken = cc == testCC;
+        const uint64_t loss = taken == (predict != 0) ? (taken ? 4u : 0u) : 8u;
+        Check(f.timing.EstimatedCycles() == 1 + loss + (taken ? 0u : 5u), "runtime branch prediction/outcome timing");
+        Check(f.cpu.pc == (taken ? 0x108u : 0x200u) && f.cpu.packet_entries == (taken ? 1u : 2u),
+              "branch hints affect shadow loss, never guest outcome");
+    }
+}
+
+void ShadowMultiple() {
+    for (uint32_t registers : {1u, 4u, 8u}) {
+        Fixture f(true);
+        const uint16_t tail = static_cast<uint16_t>((8u - registers) << 3);
+        f.memory.write16(0x100, static_cast<uint16_t>(0x0540u | tail)); // PUSH R7:Rn
+        f.memory.write16(0x102, static_cast<uint16_t>(0x0500u | tail)); // POP R7:Rn
+        f.memory.write16(0x104, 0x0050);
+        const auto sp = f.cpu.dpregs[14];
+        f.Run(0x100);
+        Check(f.cpu.packet_entries == 3 && f.cpu.dpregs[14] == sp && f.timing.EstimatedCycles() == 2u * registers + 5u,
+              "multiple-register decode occupancy includes baseline, not baseline plus N");
+        Check(f.timing.unknowns[static_cast<unsigned>(ShadowUnknown::MemoryWait)] == 2, "stack memory waits remain unknown");
+    }
+    Fixture f(true);
+    f.memory.write16(0x100, 0x05C0); // PUSH R7:R0,P5:P0 (14 registers).
+    f.memory.write16(0x102, 0x0580);
+    f.memory.write16(0x104, 0x0050);
+    f.Run(0x100);
+    Check(f.timing.EstimatedCycles() == 33, "combined data/pointer register cost");
+}
+
+void ShadowParallelAndUnknown() {
+    Fixture f(true);
+    f.cpu.iregs[0] = 0x400;
+    f.cpu.iregs[1] = 0x500;
+    f.memory.write16(0x100, 0xC803);
+    f.memory.write16(0x102, 0x1800);
+    f.memory.write16(0x104, 0x9C00);
+    f.memory.write16(0x106, 0x9C09);
+    f.memory.write16(0x108, 0x0024); // SSYNC: cost of outstanding work unknown.
+    f.memory.write16(0x10A, 0x0050);
+    f.Run(0x100);
+    Check(f.timing.packets == 3 && f.timing.EstimatedCycles() == 7, "parallel packet counts maximum slot issue, not three issues");
+    Check(f.timing.known_issue_packets == 2 && f.timing.unknown_fixed_packets == 1 && f.timing.unknown_packets == 2,
+          "known fixed issue, unknown fixed duration and overlapping unknowns are separate");
+    Check(f.timing.unknowns[static_cast<unsigned>(ShadowUnknown::MemoryWait)] == 1 &&
+          f.timing.unknowns[static_cast<unsigned>(ShadowUnknown::SyncCost)] == 1,
+          "parallel memory and synchronization remain uncovered, without invented stall constants");
+    Check(f.timing.unknown_opcodes.at("ProgCtrl_SSYNC") == 1, "unsupported opcode histogram is runtime, not translation count");
+}
+
+void ShadowHardwareLoops() {
+    for (uint32_t top : {2u, 3u}) {
+        Fixture f(true);
+        f.cpu.dpregs[8] = 3;
+        f.cpu.dpregs[9] = 0x200;
+        f.memory.write16(0x100, static_cast<uint16_t>(0xE0A0u | top)); // LSETUP LC0=P0
+        f.memory.write16(0x102, 4); // Bottom 0x108.
+        f.memory.write16(0x10A, 0x0051);
+        for (unsigned i = 0; i < 4; ++i) f.Run(i ? f.cpu.pc : 0x100);
+        Check(f.cpu.pc == 0x200 && f.cpu.lc[0] == 0, "LSETUP and loop semantics unchanged");
+        Check(f.timing.loop_first_penalties == (top == 2 ? 0u : 1u), "non-adjacent first loopback charged only once");
+        Check(f.timing.EstimatedCycles() == (top == 2 ? 15u : 17u) && f.timing.loop_replays == 0,
+              "LSETUP internal register writes do not incur restore replay penalties");
+    }
+    Fixture f(true);
+    f.memory.write16(0x100, 0x3C00); // LC0=R0: unconditional replay.
+    f.memory.write16(0x102, 0x3C08); // LT0=R0: replay only with active LC0.
+    f.memory.write16(0x104, 0x0050);
+    f.cpu.dpregs[0] = 2;
+    f.Run(0x100);
+    Check(f.timing.loop_replays == 2 && f.timing.EstimatedCycles() == 27, "LC and active LT restore add ten-cycle replay each");
+}
+
+void ShadowEventsAndFaults() {
+    Fixture f(true);
+    f.UserMode();
+    evt_set(3, 0x300);
+    f.cpu.dpregs[8] = 0x201;
+    f.memory.write16(0x100, 0x0050);
+    f.memory.write16(0x300, 0x0012);
+    f.Run(0x100);
+    Check(f.timing.event_entries == 1 && f.timing.unknowns[static_cast<unsigned>(ShadowUnknown::EventEntry)] == 1 &&
+          f.timing.unknowns[static_cast<unsigned>(ShadowUnknown::FaultAttempt)] == 1,
+          "fault and dispatched event coverage have no invented event-entry cost");
+    const auto before = f.timing.EstimatedCycles();
+    f.Run(0x300);
+    Check(f.timing.EstimatedCycles() == before + 1 && f.timing.unknowns[static_cast<unsigned>(ShadowUnknown::ReturnCost)] == 2,
+          "RTX has only issue baseline and explicit unknown fixed remainder");
+}
+
+void ShadowDagAndRtsComponents() {
+    Fixture f(true);
+    f.cpu.iregs[0] = 0x400;
+    f.cpu.rets = 0x200;
+    f.memory.write16(0x100, 0x9F60); // I0 += 2
+    f.memory.write16(0x102, 0x0010); // RTS
+    f.Run(0x100);
+    Check(f.cpu.packet_entries == 2 && f.cpu.pc == 0x200 && f.cpu.iregs[0] == 0x402,
+          "add-immediate DAG and RTS architectural results");
+    Check(f.timing.EstimatedCycles() == 6 && f.timing.issue_cycles == 2 && f.timing.penalty_cycles == 4,
+          "DAG issue baseline plus RTS generic redirect component, not summed total tables");
+    Check(f.timing.known_issue_packets == 1 && f.timing.unknown_fixed_packets == 1 &&
+          f.timing.unknowns[static_cast<unsigned>(ShadowUnknown::ReturnCost)] == 1 &&
+          f.timing.unknowns[static_cast<unsigned>(ShadowUnknown::Dependency)] == 2,
+          "DAG fixed gap closed but dependencies and complete RTS remainder stay explicit");
+}
+
+void ShadowIdleSites() {
+    Fixture f(true);
+    f.memory.write16(0x100, 0x0020);
+    f.memory.write16(0x102, 0x0050);
+    for (unsigned i = 0; i < 3; ++i) {
+        f.Run(0x100);
+        Check(f.cpu.idle && f.cpu.pc == 0x102 && f.cpu.idle_entries == i + 1,
+              "IDLE counts once and terminates block before ordinary suffix");
+        for (unsigned j = 0; j < 5; ++j) f.Run(0x102);
+        Check(f.cpu.packet_entries == i + 1, "no packet attempts while idle");
+        f.cpu.idle = false; // Synthetic external wake, not a firmware workaround.
+    }
+    Check(f.cpu.packet_entries == 3 && f.timing.idle_sites.at(0x100).count == 3,
+          "shadow observer counts actual IDLE entries only");
+    Check(f.timing.idle_sites.at(0x100).first_packet == 1 && f.timing.idle_sites.at(0x100).last_packet == 3 &&
+          f.timing.unknowns[static_cast<unsigned>(ShadowUnknown::IdleTime)] == 3,
+          "site counts and unmodelled idle duration stay distinct");
+}
+
+void IdlePrivilegeAndInterruptWake() {
+    Fixture f;
+    f.UserMode();
+    evt_set(3, 0x300);
+    f.memory.write16(0x100, 0x0020);
+    f.Run(0x100);
+    Check(!f.cpu.idle && f.cpu.idle_entries == 0 && f.cpu.pc == 0x300,
+          "user-mode IDLE faults without entering idle");
+    // Exception context is supervisor; a higher priority NMI wakes and vectors.
+    f.memory.write16(0x300, 0x0020);
+    evt_set(2, 0x400);
+    f.Run(0x300);
+    Check(f.cpu.idle && f.cpu.pc == 0x302, "supervisor IDLE saves resume PC");
+    cec_raise(&f.cpu, 2);
+    cec_check_pending(&f.cpu);
+    Check(!f.cpu.idle && f.cpu.pc == 0x400 && f.cpu.retn == 0x302,
+          "eligible core event wakes normally and preserves post-IDLE return PC");
+
+    Fixture irq;
+    irq.memory.write16(0x80, 0x0011);
+    irq.memory.write16(0x100, 0x0020);
+    irq.cpu.reti = 0x100;
+    evt_set(15, 0x100);
+    evt_set(11, 0x300);
+    cec_mmr_write(&irq.cpu, CEC_MMR_BASE + 4, (1u << 15) | (1u << 11));
+    cec_raise(&irq.cpu, 15);
+    irq.Run(0x80);
+    irq.cpu.did_jump = false;
+    cec_push_reti(&irq.cpu);
+    irq.Run(0x100);
+    Check(irq.cpu.idle && irq.cpu.packet_entries == 2, "IRQ15-context IDLE counted once");
+    cec_raise(&irq.cpu, 11);
+    cec_check_pending(&irq.cpu);
+    Check(!irq.cpu.idle && irq.cpu.pc == 0x300 && irq.cpu.reti == 0x102 &&
+          irq.cpu.packet_entries == 2, "eligible maskable interrupt wakes and vectors without synthetic issue");
+}
+
+void SameValueVRIntegrationStop() {
+    // No peripheral polling occurs: entry/wake and the unsupported-time guard
+    // both return before the existing device-processing loop.
+    BlackFinCpu cpu;
+    cpu.GetEmulator().MemoryWrite16(0x100, 0x0020);
+    cpu.GetEmulator().MemoryWrite16(0x102, 0x2000);
+    cpu.GetEmulator().MemoryWrite16(0xFFC00008, 0x70B0);
+    cpu.SetPC(0x100);
+    cpu.Run();
+    Check(!cpu.IsIdle() && !cpu.UnsupportedIdle() && cpu.PC() == 0x102 &&
+          cpu.PacketEntryCount() == 1 && cpu.IdleEntryCount() == 1 &&
+          cpu.ClockState().NextDeadlineTicks() == 512 && cpu.ClockState().Status() == 0xA1,
+          "same-value VR wakes immediately but retains outstanding bypass countdown");
+    cpu.Run();
+    Check(cpu.UnsupportedIdle() && !cpu.IsIdle() && cpu.PacketEntryCount() == 1 &&
+          cpu.ClockState().ClkinTicks() == 0 && cpu.ClockState().NextDeadlineTicks() == 512,
+          "missing awake CLKIN source is explicit, not guessed from packets or host time");
+}
+
+class ScopedEnv {
+public:
+    ScopedEnv(const char* name, const char* value) : name_(name) {
+        if (const char* old = std::getenv(name)) old_ = old;
+        Check((value ? setenv(name, value, 1) : unsetenv(name)) == 0, "set test environment");
+    }
+    ~ScopedEnv() { if (old_) setenv(name_, old_->c_str(), 1); else unsetenv(name_); }
+    ScopedEnv(const ScopedEnv&) = delete;
+    ScopedEnv& operator=(const ScopedEnv&) = delete;
+private:
+    const char* name_;
+    std::optional<std::string> old_;
+};
+
+void AwakeBypassGuestDeltas() {
+    Fixture f(true);
+    BF524PLL pll(25000000);
+    pll.Write32(8, 0x70B0);
+    Check(pll.EnterIdle(), "same VR request starts bypass");
+    pll.AcknowledgeWake();
+    f.timing.issue_cycles = 10000; // Old observational work must never be re-consumed.
+    // Two maximum-length blocks of NOPs, each with 256 documented issue cycles.
+    // Consumption uses measured shadow deltas, not their instruction count.
+    for (uint32_t pc = 0x100; pc < 0x500; pc += 2) f.memory.write16(pc, 0);
+    auto run = [&](uint32_t pc) {
+        const bool awake = !f.cpu.idle;
+        const auto before = f.timing.EstimatedCycles();
+        f.Run(pc);
+        return pll.AdvanceAwakeBypass(f.timing.EstimatedCycles() - before, awake, true);
+    };
+    auto first = run(0x100);
+    Check(first.consumed == 256 && !first.expired && pll.ClkinTicks() == 256 &&
+          pll.NextDeadlineTicks() == 256, "new actual guest shadow delta only, not old 10000 cycles");
+    f.cpu.idle = true;
+    const auto noIssue = run(f.cpu.pc);
+    Check(noIssue.consumed == 0 && pll.ClkinTicks() == 256 && pll.NextDeadlineTicks() == 256,
+          "idle core executes no cycles and awake path consumes no ticks");
+    f.cpu.idle = false;
+    const auto second = run(f.cpu.pc);
+    Check(second.consumed == 256 && second.expired && second.overshoot == 0 &&
+          pll.ClkinTicks() == 512 && !pll.NextDeadlineTicks() && !pll.CoreHz(),
+          "exactly 512 modeled cycles expire 512 CLKIN ticks; reset active clock remains unknown");
+    const auto afterExpiry = run(f.cpu.pc);
+    Check(afterExpiry.consumed == 0 && !afterExpiry.expired && pll.ClkinTicks() == 512,
+          "functional execution after expiry does not continue clock conversion");
+
+    BF524PLL branchPLL(25000000);
+    branchPLL.Write32(8, 0x70B0);
+    branchPLL.EnterIdle(); branchPLL.AcknowledgeWake();
+    f.memory.write16(0x800, 0x2000); // JUMP +0: issue 1 plus documented redirect component 4.
+    uint64_t consumed = 0;
+    BF524PLL::AwakeAdvance last;
+    for (unsigned i = 0; i < 103; ++i) {
+        const auto before = f.timing.EstimatedCycles();
+        f.Run(0x800);
+        const auto delta = f.timing.EstimatedCycles() - before;
+        Check(delta == 5, "guest execution includes branch latency, not just packet count");
+        last = branchPLL.AdvanceAwakeBypass(delta, true, true);
+        consumed += last.consumed;
+    }
+    Check(consumed == 512 && branchPLL.ClkinTicks() == 512 && last.consumed == 2 &&
+          last.overshoot == 3 && last.expired, "515 block-accounted cycles consume bounded 512 ticks with overshoot 3");
+}
+
+void AwakeBypassPlatformExperiment() {
+    ScopedEnv clock("OP1EMU_EXPERIMENTAL_CLKIN_HZ", "25000000");
+    ScopedEnv shadow("OP1EMU_SHADOW_TIMING", "1");
+    ScopedEnv experiment("OP1EMU_EXPERIMENTAL_PLL_AWAKE_BYPASS", "1");
+    BlackFinCpu cpu;
+    cpu.AttachNandFlash(std::make_shared<IdleNand>());
+    cpu.GetEmulator().MemoryWrite16(0x100, 0x0020);
+    for (uint32_t pc = 0x102; pc < 0x502; pc += 2) cpu.GetEmulator().MemoryWrite16(pc, 0);
+    cpu.GetEmulator().MemoryWrite16(0x502, 0x2000);
+    cpu.GetEmulator().MemoryWrite16(0xFFC00008, 0x70B0);
+    cpu.SetPC(0x100); cpu.Run();
+    Check(cpu.ShadowTimingStats()->EstimatedCycles() == 1 && cpu.ClockState().ClkinTicks() == 0 &&
+          cpu.ClockState().NextDeadlineTicks() == 512, "activation block/IDLE issue precedes countdown and is not charged");
+    cpu.Run();
+    Check(cpu.ClockState().ClkinTicks() == 256 && cpu.AwakePLLExperimentStats().consumed == 256 &&
+          !cpu.UnsupportedIdle(), "platform consumes new first block delta");
+    cpu.Run();
+    const auto& s = cpu.AwakePLLExperimentStats();
+    Check(cpu.ClockState().ClkinTicks() == 512 && !cpu.ClockState().CoreHz() &&
+          s.consumed == 512 && s.overshoot == 0 && s.blocks == 2 && s.expiries == 1,
+          "platform bounded countdown expires exactly once");
+    cpu.Run();
+    Check(!cpu.UnsupportedIdle() && cpu.ClockState().ClkinTicks() == 512 && s.expiries == 1 &&
+          cpu.ShadowTimingStats()->EstimatedCycles() == 518, "post-bypass functional execution continues with unknown active reset clock");
+    cpu.GetEmulator().MemoryWrite16(0x600, 0x0020);
+    cpu.GetEmulator().MemoryWrite16(0xFFC00004, 5);
+    cpu.GetEmulator().MemoryWrite16(0xFFC00000, 0x2000);
+    cpu.SetPC(0x600); cpu.Run();
+    Check(!cpu.IsIdle() && !cpu.UnsupportedIdle() && cpu.ClockState().ClkinTicks() == 1024 &&
+          cpu.ClockState().CoreHz() == 400000000 && cpu.IdleEntryCount() == 2 &&
+          s.consumed == 512 && s.expiries == 1, "idle PLL lock advances its separate 512 ticks without re-consuming any shadow cycles");
+}
+
+void AwakeBypassOptIns() {
+    for (unsigned missing = 0; missing < 3; ++missing) {
+        ScopedEnv clock("OP1EMU_EXPERIMENTAL_CLKIN_HZ", missing == 0 ? nullptr : "25000000");
+        ScopedEnv shadow("OP1EMU_SHADOW_TIMING", missing == 1 ? "0" : "1");
+        ScopedEnv experiment("OP1EMU_EXPERIMENTAL_PLL_AWAKE_BYPASS", missing == 2 ? "0" : "1");
+        BlackFinCpu cpu;
+        cpu.GetEmulator().MemoryWrite16(0x100, 0x0020);
+        cpu.GetEmulator().MemoryWrite16(0xFFC00008, 0x70B0);
+        cpu.SetPC(0x100); cpu.Run(); cpu.Run();
+        Check(cpu.UnsupportedIdle() && cpu.PacketEntryCount() == 1 &&
+              cpu.ClockState().ClkinTicks() == 0 && cpu.AwakePLLExperimentStats().consumed == 0,
+              "all three explicit opt-ins required; missing gate preserves observable stop");
+    }
 }
 }
 
@@ -598,5 +941,18 @@ int main() {
     CpuExecutionFailure();
     MdmaIdleWake();
     CpuExposure();
+    ShadowSequentialAndDisabled();
+    ShadowBranches();
+    ShadowMultiple();
+    ShadowParallelAndUnknown();
+    ShadowHardwareLoops();
+    ShadowEventsAndFaults();
+    ShadowDagAndRtsComponents();
+    ShadowIdleSites();
+    IdlePrivilegeAndInterruptWake();
+    SameValueVRIntegrationStop();
+    AwakeBypassGuestDeltas();
+    AwakeBypassPlatformExperiment();
+    AwakeBypassOptIns();
     std::puts("execution accounting: all runtime packet-entry cases passed");
 }
