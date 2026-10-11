@@ -48,7 +48,9 @@ message(STATUS "Fetching stb...")
 FetchContent_Declare(
     stb
     GIT_REPOSITORY https://github.com/nothings/stb.git
-    GIT_TAG master
+    # stb has no releases; pin the master commit the verified local builds used
+    # (2026-08-01, "Merge pull request #1984") so builds are reproducible.
+    GIT_TAG 2c980bb59875b0d32144a71867fbdebb2f77cd20
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(stb)
