@@ -1,6 +1,7 @@
 #include "sport.h"
 #include "emu.h"
 #include "utils/log.h"
+#include <cstring>
 #include <stdexcept>
 
 enum DataFormat {
@@ -150,6 +151,7 @@ u32 SPORT::DMARead(int x, int y, void* dest, u32 length)
     }
 
     // Fill with silence
+    std::memset(dest, 0, static_cast<std::size_t>(frames) * static_cast<std::size_t>(frameSize));
     totalRxSamplesDelivered_ += available;
     return static_cast<u32>(frames * static_cast<uint64_t>(frameSize));
 }

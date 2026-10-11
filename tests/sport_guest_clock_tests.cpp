@@ -95,6 +95,27 @@ void StereoRates() {
     Check(rig.DrainRx() == 88200 * 4 && rig.sport.ReceiveWords() == 88200, "88,200 RX words per guest second");
 }
 
+// With no audio input attached, received words are silence: every byte that
+// DMARead() reports as delivered must be written (as zero). Bytes left
+// unwritten would carry whatever the caller's staging buffer held; for the
+// DMA that is an uninitialised stack array.
+void RxWithoutInputIsSilence() {
+    for (const u32 config2 : {0x021Fu, 0x001Fu}) { // stereo and mono, 32-bit words
+        Rig rig(config2);
+        u8 buffer[4096];
+        Check(rig.sport.DMARead(0, 0, buffer, sizeof(buffer)) == 0, "the first RX access starts the clock");
+        rig.now = kClkin / 100; // 10 ms: 441 frames due
+        std::fill(std::begin(buffer), std::end(buffer), u8{0xA5});
+        const u32 moved = rig.sport.DMARead(0, 0, buffer, sizeof(buffer));
+        const u32 frameBytes = config2 == 0x021Fu ? 8u : 4u;
+        Check(moved == 441 * frameBytes, "441 frames delivered");
+        Check(std::all_of(buffer, buffer + moved, [](u8 b) { return b == 0; }),
+              "every delivered RX byte is silence without an input callback");
+        Check(std::all_of(buffer + moved, std::end(buffer), [](u8 b) { return b == 0xA5; }),
+              "bytes beyond the delivered length are untouched");
+    }
+}
+
 void MonoRates() {
     for (u32 config : {0x001Fu, 0x000Fu}) {
         Rig rig(config);
@@ -514,6 +535,7 @@ void StrictAndUnsetNeverPaceOnGuestClock() {
 int main() {
     Arithmetic();
     StereoRates();
+    RxWithoutInputIsSilence();
     MonoRates();
     NoDrift();
     NoHostTime();
