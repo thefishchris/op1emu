@@ -194,6 +194,7 @@ The full register of hacks, assumptions and limitations is
 - [v241 input provenance](docs/v241-nand-provenance-and-traversal.md)
 
 **Design and device models:**
+- [Blackfin CPU emulation options and decision](docs/blackfin-emulation-options.md)
 - [Guest clock architecture](docs/guest-clock-architecture.md)
 - [Multi-block execution](docs/multiblock-execution.md)
 - [Device polling fast paths](docs/device-polling-fast-paths.md)
