@@ -1,5 +1,10 @@
 # Checkpoint: NFC PIO and finite MDMA boundaries completed
 
+> **Historical record.** Paths under `/tmp/opencode/` name local scratch files from the
+> original investigation (scripts, PDFs, logs, image copies). They are not part of the
+> repository and are not needed to build or run the emulator. Current procedures:
+> `README.md`, `docs/emulator-profiles.md` and `docs/headless-regression.md`.
+
 **Current 2D MDMA checkpoint:** the observed repeated-four-halfword / 512-byte-pitch
 MDMA0 copy now completes as a finite device operation. Its pre-IDLE DONE poll
 succeeds, so `018D4736` is avoided; no ineligible wake was invented. A fresh
@@ -41,7 +46,7 @@ disconnected.
 
 ## Git
 
-- Checkout: `/home/chris/Projects/op1-emu-gui-test/op1emu`
+- Checkout: the local development working tree
 - Branch/HEAD: `wip/pll-idle-timing` at `18db27f` (`feat: model NAND and NFC DMA idle completions`)
 - Bcore branch/HEAD: `wip/op1-timing` at `37de8e8`
 - Parent tree heavily dirty and unstaged. Includes earlier boot/audio/GPIO/storage work plus this PLL/IDLE work. Do not clean, reset, or sweep unrelated files into a commit.
@@ -331,10 +336,13 @@ passed before the trial: `pll_idle_tests`, `execution_accounting_tests`,
 `sport_audio_tests`, `audio_ring_tests`, and `otp_import_tests`.
 
 ```bash
+# Historical command set: some targets existed only in the uncommitted working tree,
+# and the trials ran through a local, unpublished wrapper script.
 cmake --build build --target op1emu pll_idle_tests execution_accounting_tests sport_audio_tests usb_reset_tests mcp23017_tests pcm_sample_tests audio_ring_tests nand_ecc_tests -j2
 ctest --test-dir build -R '^(pll_idle_tests|execution_accounting_tests|sport_audio_tests|audio_ring_tests|pcm_sample_tests|mcp23017_tests|nand_ecc_tests|otp_import_tests|usb_reset_tests)$' --output-on-failure
-OP1EMU_EXPERIMENTAL_CLKIN_HZ=25000000 OP1EMU_SHADOW_TIMING=1 OP1EMU_TRACE_CLOCK=1 OP1EMU_EXPERIMENTAL_PLL_AWAKE_BYPASS=1 \
-  python3 /tmp/opencode/boot_trials.py NEW-UNUSED-PREFIX 10 420
+#   OP1EMU_EXPERIMENTAL_CLKIN_HZ=25000000 OP1EMU_SHADOW_TIMING=1 OP1EMU_TRACE_CLOCK=1 OP1EMU_EXPERIMENTAL_PLL_AWAKE_BYPASS=1 \
+#     python3 /tmp/opencode/boot_trials.py NEW-UNUSED-PREFIX 10 420
+# Current runs: ./run-op1.sh --headless --profile strict|functional ... (docs/emulator-profiles.md)
 ```
 
 ## Preserve

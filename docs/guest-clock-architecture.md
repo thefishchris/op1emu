@@ -45,7 +45,8 @@ Related documents:
   `0x019F18F4` boundary capture.
 - `docs/bf524-execution-accounting.md`, `docs/shadow-timing-coverage.md`:
   packet-entry accounting and the opt-in shadow issue model.
-- `docs/guest-progress-clock-inspection.md`: current host-derived time paths.
+- Host-derived time paths: `docs/hacks.md` (H3). The original inspection notes
+  (`guest-progress-clock-inspection.md`) are local and were not committed.
 - `docs/hacks.md`: existing timing hacks (audio and core timer slowdowns).
 
 ## 1. Problem
@@ -558,7 +559,7 @@ Device-safety review is required before touching a real OP-1.
   timer/ISR interplay. Measure it before deciding on block splitting.
 - **Mixed domains (D8):** with the core timer on guest time and SPORT on host
   time, the timer/audio ratio differs from today's.
-  `docs/audio-startup-divergence.md` shows that ratio alone did not explain the
+  Local, uncommitted notes (`audio-startup-divergence.md`) showed that ratio alone did not explain the
   startup regression, but mixed-mode runs must not be read as audio evidence.
 - **Throughput:** upstream reports about 5–10 M guest cycles/s. Real-time
   pacing is a later frontend concern: a host may only throttle, never drive,

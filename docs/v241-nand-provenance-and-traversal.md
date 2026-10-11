@@ -1,5 +1,10 @@
 # v241 immutable inputs and loaded-code traversal (2026-10-08)
 
+> **Historical record.** Paths under `/tmp/opencode/` name local scratch files from the
+> original investigation (scripts, PDFs, logs, image copies). They are not part of the
+> repository and are not needed to build or run the emulator. Current procedures:
+> `README.md`, `docs/emulator-profiles.md` and `docs/headless-regression.md`.
+
 ## Result
 
 **Latest continuation:** the narrow observed 2D MDMA0 extension now clears the
@@ -147,11 +152,12 @@ OTP import was repeated with an exclusive new output:
 ```sh
 python3 tools/import_otp_dump.py build/tolsi-otp-source.txt \
   /tmp/opencode/otp-reconstructed.bin --base build/otp-before-provisioning.bin \
-  --override-page 0xdf:204547414e454554:5245454e49474e45
+  --override-page 0xdf:LOW64:HIGH64
 ```
 
-The output matched `otp-tolsi.bin` exactly. The explicit malformed-source page
-correction remains **LIKELY**, as documented in `local-working-setup.md`.
+The output matched `otp-tolsi.bin` exactly. The explicit page `0xDF` override (a
+reconstruction of the source dump's malformed entry; its value is OTP content and is not
+reproduced here) remains **LIKELY**. See `docs/otp-image.md` for the importer.
 
 Two fresh `mkyaffs2image` invocations from the current staging tree produced
 `e21317115d15d58d5b08ab503b583d1b2461f3866e602f1526eb039875c409e9`,

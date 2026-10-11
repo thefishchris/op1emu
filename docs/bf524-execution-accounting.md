@@ -1,5 +1,10 @@
 # BF524 executed-work accounting and timing evidence
 
+> **Historical record.** Paths under `/tmp/opencode/` name local scratch files from the
+> original investigation (scripts, PDFs, logs, image copies). They are not part of the
+> repository and are not needed to build or run the emulator. Current procedures:
+> `README.md`, `docs/emulator-profiles.md` and `docs/headless-regression.md`.
+
 ## Result and scope
 
 **CONFIRMED:** Bcore now counts runtime **instruction/packet entries**. A

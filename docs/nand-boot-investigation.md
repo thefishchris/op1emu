@@ -62,8 +62,9 @@ No dump contents or generated images belong in source control.
 
 CPU PC snapshots during NAND callbacks may refer to the current translated
 basic block rather than the exact instruction issuing the access. Subsequent
-OTP/content provisioning produced the normal v241 tape UI; see
-`docs/local-working-setup.md`. Complete CPU/device correctness is not established.
+OTP/content provisioning produced the normal v241 tape UI; see `README.md`,
+`docs/otp-image.md` and `docs/yaffs-provisioning.md`. Complete CPU/device correctness
+is not established.
 
 ## Reset and page-read completion
 
@@ -217,7 +218,7 @@ Follow-up completed: a separate imported OTP image enabled the normal firmware
 path; the missing stock v241 content filesystem was then provisioned with
 guest-verified filesystem ECC layout. Initialization completed into the normal
 tape UI and the user confirmed successful boot. Reproduction and remaining
-limitations are in `docs/local-working-setup.md`. No guessed `0x50` handler or
+limitations are in `README.md` and `docs/hacks.md`. No guessed `0x50` handler or
 forced escape from the ROM error loop was added.
 
 Sources:

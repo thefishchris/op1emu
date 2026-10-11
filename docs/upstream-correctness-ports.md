@@ -1,5 +1,10 @@
 # Narrow upstream correctness ports
 
+> **Historical record.** Paths under `/tmp/opencode/` name local scratch files from the
+> original investigation (scripts, PDFs, logs, image copies). They are not part of the
+> repository and are not needed to build or run the emulator. Current procedures:
+> `README.md`, `docs/emulator-profiles.md` and `docs/headless-regression.md`.
+
 These ports are hand-applied to parent `24fdc71` / Bcore `37de8e8`; they are
 not a merge of upstream and do not adopt a guest clock or timing architecture.
 The power-manager IDLE at `019F18F4` remains Decision B.

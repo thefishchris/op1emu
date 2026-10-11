@@ -1,5 +1,10 @@
 # BF524 PLL / architectural IDLE foundation
 
+> **Historical record.** Paths under `/tmp/opencode/` name local scratch files from the
+> original investigation (scripts, PDFs, logs, image copies). They are not part of the
+> repository and are not needed to build or run the emulator. Current procedures:
+> `README.md`, `docs/emulator-profiles.md` and `docs/headless-regression.md`.
+
 ## Result and boundary
 
 **Implemented and synthetic-tested:** a disconnected BF524 PLL input-tick domain,
@@ -208,13 +213,15 @@ at an unsupported interval, rather than busy-executing past it.
 ## Reproduction and smallest next step
 
 ```bash
+# Historical command set: some targets existed only in the uncommitted working tree.
 cmake -S . -B build
 cmake --build build --target op1emu pll_idle_tests execution_accounting_tests sport_audio_tests usb_reset_tests mcp23017_tests pcm_sample_tests audio_ring_tests nand_ecc_tests -j2
 ctest --test-dir build -R '^(pll_idle_tests|execution_accounting_tests|sport_audio_tests|audio_ring_tests|pcm_sample_tests|mcp23017_tests|nand_ecc_tests|otp_import_tests|usb_reset_tests)$' --output-on-failure
 
-# X11/Xwayland required; choose a NEW, unused prefix.
-OP1EMU_EXPERIMENTAL_CLKIN_HZ=25000000 OP1EMU_SHADOW_TIMING=1 OP1EMU_TRACE_CLOCK=1 \
-  python3 /tmp/opencode/boot_trials.py NEW-UNUSED-PREFIX 10 420
+# Historical: trials ran through a local, unpublished wrapper script:
+#   OP1EMU_EXPERIMENTAL_CLKIN_HZ=25000000 OP1EMU_SHADOW_TIMING=1 OP1EMU_TRACE_CLOCK=1 \
+#     python3 /tmp/opencode/boot_trials.py NEW-UNUSED-PREFIX 10 420
+# Current runs: ./run-op1.sh --headless --profile strict|functional ... (docs/emulator-profiles.md)
 ```
 
 The first foundation trial's next prerequisite was an awake bypass time source.

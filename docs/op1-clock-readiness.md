@@ -1,5 +1,10 @@
 # Original OP-1 CLKIN, PLL activation, fixed costs and IDLE
 
+> **Historical record.** Paths under `/tmp/opencode/` name local scratch files from the
+> original investigation (scripts, PDFs, logs, image copies). They are not part of the
+> repository and are not needed to build or run the emulator. Current procedures:
+> `README.md`, `docs/emulator-profiles.md` and `docs/headless-regression.md`.
+
 ## Subsequent implementation checkpoint
 
 [BF524 PLL/IDLE foundation](bf524-pll-idle-foundation.md) supersedes the earlier
@@ -15,7 +20,7 @@ The sections below retain the earlier investigation evidence.
 
 ## Update: user-supplied board close-up
 
-The subsequently supplied `/home/chris/Projects/op-1_emu/board-pic.jpg` provides
+The subsequently supplied local photo `board-pic.jpg` (not in the repository) provides
 better routing evidence than the earlier iFixit images. Its source URL is not
 yet known; preserve that provenance distinction. Image size is 960 x 720 and
 SHA-256 is `dd4291f273b7241e4d1f3fbc3eae6ecddf720bfb3278074d12efcdf89a9fb50c`.

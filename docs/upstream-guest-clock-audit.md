@@ -1,5 +1,10 @@
 # Upstream deterministic guest-clock audit
 
+> **Historical record.** Paths under `/tmp/opencode/` name local scratch files from the
+> original investigation (scripts, PDFs, logs, image copies). They are not part of the
+> repository and are not needed to build or run the emulator. Current procedures:
+> `README.md`, `docs/emulator-profiles.md` and `docs/headless-regression.md`.
+
 Audit date: 2026-10-09. Scope: compare upstream op1emu's deterministic
 guest-time work with this fork's PLL/IDLE timing foundation, **for plumbing
 only**. This is not a design document; the design is
@@ -46,7 +51,7 @@ The common ancestor of this fork and PR #13 is `3b926b1`
 
 ## What upstream `TimeSource` does
 
-`src/cpu/time_source.h` (`c914560`, amended by `432fa9e`):
+Upstream `src/cpu/time_source.h` (`c914560`, amended by `432fa9e`; not in this fork):
 
 - A `TimeSource` with two models, chosen once at CPU construction by
   `--deterministic`:
@@ -82,7 +87,7 @@ Plumbing changes around it:
 - `656c9e8`: in headless deterministic runs, leading accelerometer/volume
   script commands are applied before the CPU thread starts, and the random
   accelerometer feed sends one sample per poll.
-- Tests: `tests/time_source_test.cpp`.
+- Tests: upstream `tests/time_source_test.cpp`.
 
 Upstream's own reported limits (PR body): an "issue model with no pipeline,
 cache or PLL timing"; deterministic mode runs roughly 5–10 M guest cycles/s,
@@ -184,6 +189,10 @@ the BF52x Hardware Reference, chapter 11:
   IDLE. See the architecture document for the evidence on both sides.
 
 ## Local dirty-work inventory (must remain untouched)
+
+> **Historical snapshot (2026-10-09).** Many files listed below have since been
+> committed, and `run-op1.sh` is now a committed launcher that takes image paths as
+> arguments. The current hack register is `docs/hacks.md`.
 
 Recorded at audit time with parent `HEAD` `1b21548` on `wip/pll-idle-timing`
 (3 ahead of origin, not pushed) and bcore `ae6b207` on `wip/op1-timing`
