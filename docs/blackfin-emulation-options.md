@@ -1,10 +1,16 @@
 # Blackfin CPU emulation options
 
-**Status:** decision recorded for the first functional milestone. The
-project owner's review sign-off is pending (see [Review record](#review-record)).
+**Status:** engineering decision **approved by the project maintainer** on
+2026-10-11 for the first functional release (see [Review record](#review-record)).
+The legal and provenance questions under
+[Outstanding uncertainties](#outstanding-uncertainties) remain **unresolved**.
+This approval is an engineering decision. It is not legal advice, a
+determination by legal counsel, or permission from any third-party rights
+holder.
 
-`AGENTS.md` requires this record to be complete and reviewed before a
-Blackfin CPU implementation is adopted or copied. op1emu inherited the Bcore
+`AGENTS.md` requires this record to be updated and reviewed before a
+Blackfin CPU implementation is copied in, replaced or substantially
+reworked. op1emu inherited the Bcore
 CPU core from the upstream project before this record existed. This
 document records that choice after the fact, together with the evidence
 about Bcore's provenance and the conditions attached to keeping it.
@@ -130,7 +136,10 @@ as stated.
 
 ## Decision
 
-**For the first functional milestone, op1emu keeps Bcore (option A).**
+**For the first functional release, op1emu uses the existing Bcore
+implementation (option A).** The project maintainer approved this
+engineering decision on 2026-10-11, together with the conservative licensing
+approach below.
 - **Licensing:** the fork distributes Bcore under GPL-3.0-or-later and
   preserves the upstream MIT notice and the FSF/ADI attribution. op1emu's
   built programs are therefore distributed under GPL-3.0-or-later.
@@ -138,11 +147,17 @@ as stated.
   hooks the guest-clock work needs. B would bring the same licence outcome,
   with UNKNOWN integration cost and no JIT. D is not realistic before a
   first release.
-- **Licensing posture:** the GPL distribution follows the more restrictive
+- **Licensing posture:** the conservative approach. Bcore and the linked
+  emulator binaries are distributed under GPL-3.0-or-later, and the existing
+  MIT notices are kept. The GPL distribution follows the more restrictive
   reading of Bcore's provenance. It does not depend on settling whether
-  individual files are derivative works.
+  individual files are derivative works, and it does not settle that
+  question.
 
 ## Outstanding uncertainties
+
+Every item below is **UNRESOLVED** as of 2026-10-11. The maintainer's
+approval of the engineering decision does not resolve any of them.
 
 **Licensing:**
 - whether the GNU-derived and uncertain Bcore files are derivative works in
@@ -186,4 +201,12 @@ compared against the previous core.
 
 | Reviewer | Date | Outcome |
 | --- | --- | --- |
-| *pending (project owner)* | | |
+| Project maintainer | 2026-10-11 | **Approved** (engineering decision): use the existing Bcore implementation for the first functional release, under the conservative GPL-3.0-or-later distribution approach with the MIT notices preserved. Legal and provenance questions stay open. |
+
+**Not reviewed by:**
+- legal counsel;
+- the upstream Bcore author;
+- the Free Software Foundation, Analog Devices or any other rights holder.
+
+None of them has reviewed or approved this record. Record any future review
+by them here, with its date and scope.
