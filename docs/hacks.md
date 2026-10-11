@@ -81,6 +81,10 @@ Other assumptions, which apply in every profile:
 - **GPIO expanders:** all eight are MCP23017s. The interrupt wiring between
   them and to PORTG is ASSUMED (`FIXME` in `cpu.cpp`; see
   `docs/mcp23017-expander.md`).
+- **Boot ROM revision:** the validated boot ROM image is a BF52x
+  silicon-revision 0.2 image, assumed compatible with the OP-1's BF524
+  (LIKELY; `docs/boot-rom.md`). Other revisions are accepted with a warning;
+  their behaviour is UNKNOWN.
 - **Default `otp.bin`:** created when missing, with a synthesized chip ID and
   part string (`docs/otp-image.md`). Booting v241 needs a real OTP image
   instead.
@@ -104,6 +108,7 @@ These rest on documentation or direct firmware observation, not assumption:
 | Speed | Execution is well below real time: about 0.1–0.16 guest seconds per host second on the development machine, even with opt-in multi-block execution (`docs/multiblock-execution.md`). Boot to the tape UI takes minutes. |
 | Host audio | Because the guest runs below real time, the host audio device receives far fewer samples than it plays, so output is mostly underrun silence in every profile (more so in the legacy ÷10 profiles). Audio quality is not a supported feature. |
 | USB | Partial. `USB_OTG_DEV_CTL` is not modelled (reads 0). There is no bus-reset indication, no SESSION/VBUS state, no emulation of the status stages a USB/IP control transfer needs, and no USB DMA. A TX packet completes as soon as the guest marks it ready, even with no host IN request. USB/IP enumeration and the firmware updater are not supported. |
+| Boot ROM | Not distributed. A user-supplied 32 KiB image is required to boot from NAND. Without one, any entry into or access to the ROM range stops the CPU (`docs/boot-rom.md`). |
 | Real-time clock | Reads host wall time |
 | Determinism | Host-time-derived CYCLES, GP timers and RTC (H3), and host-paced frontend polling (display TE, inputs), make ordinary runs vary between hosts and runs |
 | Sensors | The frontends feed randomised accelerometer values unless the headless script fixes them (`accel X Y Z`) |

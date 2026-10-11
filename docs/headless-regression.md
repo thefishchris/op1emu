@@ -8,14 +8,16 @@ Use `--nand-rw` only when persistent guest writes are desired.
 ```sh
 cmake --build build --target op1emu-headless headless_tests execution_accounting_tests
 ./build/op1emu-headless --help
-./build/op1emu-headless /absolute/source.nand.img \
+./build/op1emu-headless /absolute/source.nand.img --boot-rom /absolute/bootrom.bin \
   --ui-config /absolute/path/to/gui/ui.json --input-script commands.txt \
   --max-runtime 600000 --stop-on-unsupported-idle \
   --screenshot-on-stop /new/output/tape.ppm
 ```
 
 `--profile strict|functional` selects an execution profile and overrides
-`OP1EMU_PROFILE` (see `docs/emulator-profiles.md`). `run-op1.sh --headless`
+`OP1EMU_PROFILE` (see `docs/emulator-profiles.md`). `--boot-rom PATH` selects
+the 32,768-byte boot ROM image and overrides `OP1EMU_BOOTROM_FILE`. Booting
+from NAND without one is refused (`docs/boot-rom.md`). `run-op1.sh --headless`
 wraps this with private input copies.
 
 The CPU still boots the original OP-1 NAND path. No flags/interrupts are fabricated

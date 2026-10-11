@@ -50,8 +50,8 @@ cd op1emu
 git submodule update --init --recursive
 ```
 
-The `ext/bcore` (CPU core) and `ext/bfin_sim` submodules are required. The
-build expects them at exactly the commits this repository pins.
+The `ext/bcore` (CPU core) submodule is required. The build expects it at
+exactly the commit this repository pins.
 
 ## Building and testing
 
@@ -77,6 +77,7 @@ Never commit it.
 | Input | What it is | Docs |
 | --- | --- | --- |
 | NAND image | A 553,648,128-byte image in the emulator layout (all 2048-byte page data, then all 64-byte OOB) holding the boot loader, v241 firmware and a provisioned content filesystem. Raw interleaved programmer dumps must be converted. | [NAND boot investigation](docs/nand-boot-investigation.md), [YAFFS provisioning](docs/yaffs-provisioning.md) |
+| Boot ROM image | The 32,768-byte BF52x on-chip boot ROM. The emulator contains none; supply your own. | [Boot ROM](docs/boot-rom.md) |
 | OTP image | An 8,192-byte image with the OP-1's OTP provisioning. Without it v241 takes its recovery path. `tools/import_otp_dump.py` builds one from a textual dump. | [OTP image](docs/otp-image.md) |
 | Firmware | v241 (`op1_241.op1`), the source of the content filesystem | [Provenance](docs/v241-nand-provenance-and-traversal.md) |
 
@@ -89,11 +90,12 @@ Never commit it.
 
 ```sh
 # GUI
-./run-op1.sh --profile functional --nand PATH/TO/nand.img --otp PATH/TO/otp.bin
+./run-op1.sh --profile functional --nand PATH/TO/nand.img --otp PATH/TO/otp.bin \
+    --boot-rom PATH/TO/bootrom.bin
 
 # Headless, scripted
 ./run-op1.sh --headless --profile functional --nand PATH/TO/nand.img --otp PATH/TO/otp.bin \
-    -- --input-script script.txt --max-runtime 900000
+    --boot-rom PATH/TO/bootrom.bin -- --input-script script.txt --max-runtime 900000
 ```
 
 **Headless script commands**, one per line:
@@ -112,9 +114,13 @@ See [headless regression](docs/headless-regression.md) and
 working directory, so run it from the repository root:
 
 ```sh
-OP1EMU_PROFILE=functional OP1EMU_OTP_FILE=PATH/TO/otp.bin \
+OP1EMU_PROFILE=functional OP1EMU_OTP_FILE=PATH/TO/otp.bin OP1EMU_BOOTROM_FILE=PATH/TO/bootrom.bin \
     ./build/op1emu PATH/TO/nand.img --nand-snapshot
 ```
+
+`OP1EMU_BOOTROM_FILE` (or the headless runner's `--boot-rom`) must name a
+32,768-byte boot ROM image. Without one, booting from NAND is refused
+([Boot ROM](docs/boot-rom.md)).
 
 `OP1EMU_OTP_FILE` must name an existing, valid 8,192-byte image. Without it
 the emulator uses (and creates if missing) `./otp.bin`.
@@ -172,6 +178,7 @@ The full register of hacks, assumptions and limitations is
 - [Temporary hacks, assumptions and limitations](docs/hacks.md)
 
 **Device data and tools:**
+- [Boot ROM image](docs/boot-rom.md)
 - [OTP image and import tool](docs/otp-image.md)
 - [YAFFS provisioning tool](docs/yaffs-provisioning.md)
 - [NAND boot investigation](docs/nand-boot-investigation.md)
@@ -199,7 +206,8 @@ The full register of hacks, assumptions and limitations is
 - [op1emu](https://github.com/op1emu/op1emu): the upstream project this fork
   is based on.
 - [bcore](https://github.com/op1emu/bcore): the Blackfin CPU core.
-- [bfin_sim](https://github.com/op1emu/bfin_sim): a Blackfin simulator, from
-  gdb/sim.
+- [bfin_sim](https://github.com/op1emu/bfin_sim): a subset of the GNU Blackfin
+  simulator. Bcore's own test suite uses its assembler tests; op1emu no longer
+  depends on it.
 - [op1kenobi](https://github.com/alexmandelshtam/op1kenobi): OP-1 screenshot
   assets used for the GUI background.

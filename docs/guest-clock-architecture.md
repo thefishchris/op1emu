@@ -475,8 +475,9 @@ Outcome: ADI sources remain ambiguous (E7/E18 against E6/E16), and the only
 direct pointer toward hypothesis A is INDIRECT. **UNKNOWN is retained.**
 
 Correction (2026-10-09): an earlier revision said `ext/bfin_sim` was not
-checked out. That was wrong; a shell glob error was misread. The pinned
-`ext/bfin_sim` (`08e9153`, a subset of the GNU Blackfin simulator) has been
+checked out. That was wrong; a shell glob error was misread. The then-pinned
+`ext/bfin_sim` (`08e9153`, a subset of the GNU Blackfin simulator, since removed
+from this repository) has been
 examined: it contains no core-timer device, and its `IDLE` handler is a no-op
 with the "timewarp to next event" code commented out. It provides no evidence
 either way.

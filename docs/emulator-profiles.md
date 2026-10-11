@@ -85,7 +85,8 @@ legacy host-time SPORT pacing; under the functional guest clock it is ignored
 
 ## What each profile assumes
 
-- **strict** enables no timing assumption. On the current v241 fixture it stops
+- **strict** enables no timing assumption. With the validated boot ROM image
+  (`docs/boot-rom.md`), on the current v241 fixture it stops
   explicitly after 1,969 packets at `EF000C3E` with `awake PLL bypass
   countdown needs a running CLKIN time source`: the firmware's same-value VR
   write starts a 512-tick bypass countdown that no evidence-backed clock can
@@ -127,24 +128,28 @@ legacy host-time SPORT pacing; under the functional guest clock it is ignored
 
 ## Reproducible commands
 
-`run-op1.sh` needs an explicit profile and inputs. It never modifies them: NAND
-opens with `--nand-snapshot`, and the OTP is copied into a fresh private run
-directory, which is printed. Private images stay outside Git.
+`run-op1.sh` needs an explicit profile and inputs, including a boot ROM image
+(`--boot-rom`, `docs/boot-rom.md`). It never modifies them: NAND opens with
+`--nand-snapshot`, the OTP is copied into a fresh private run directory, which
+is printed, and the ROM is only read. Private images stay outside Git.
 
 ```sh
 # A. strict research run (headless, stop at the first unsupported boundary)
 ./run-op1.sh --headless --profile strict --nand PATH/TO/nand.img --otp PATH/TO/otp.bin \
-    -- --stop-on-unsupported-idle --max-runtime 600000
+    --boot-rom PATH/TO/bootrom.bin -- --stop-on-unsupported-idle --max-runtime 600000
 
 # B. functional boot to the tape UI (GUI)
-./run-op1.sh --profile functional --nand PATH/TO/nand.img --otp PATH/TO/otp.bin
+./run-op1.sh --profile functional --nand PATH/TO/nand.img --otp PATH/TO/otp.bin \
+    --boot-rom PATH/TO/bootrom.bin
 
 # B'. the same, headless, with a screenshot at the first unsupported boundary
 ./run-op1.sh --headless --profile functional --nand PATH/TO/nand.img --otp PATH/TO/otp.bin \
-    -- --stop-on-unsupported-idle --max-runtime 1200000 --screenshot-on-stop NEW.ppm
+    --boot-rom PATH/TO/bootrom.bin -- --stop-on-unsupported-idle --max-runtime 1200000 \
+    --screenshot-on-stop NEW.ppm
 ```
 
-`OP1EMU_NAND` and `OP1EMU_OTP_SOURCE` may replace `--nand` and `--otp`.
+`OP1EMU_NAND`, `OP1EMU_OTP_SOURCE` and `OP1EMU_BOOTROM_FILE` may replace
+`--nand`, `--otp` and `--boot-rom`.
 
 **Build dependency:** booting a genuine v241 dump needs the NFC ECC
 P2-complement fix (`docs/nand-boot-investigation.md`), which is committed in
