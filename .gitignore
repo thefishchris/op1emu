@@ -55,3 +55,6 @@ otp*.bin
 # Vendor datasheets downloaded to the checkout root (redistribution unclear);
 # PDFs under docs/ are not affected.
 /*.pdf
+# User-supplied boot ROM images (docs/boot-rom.md)
+*.rom
+bootrom*.bin
