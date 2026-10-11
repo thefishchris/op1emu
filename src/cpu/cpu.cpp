@@ -180,7 +180,18 @@ BlackFinCpu::BlackFinCpu() : pc(0) {
     devices.emplace_back(std::make_shared<MemoryDevice>("MMU", 0xFFE00000, 0x2000));
 
     devices.emplace_back(std::make_shared<EBIU>(0xFFC00A00));
-    devices.emplace_back(std::make_shared<OTP>(0xFFC03600, "otp.bin"));
+    // OP1EMU_OTP_FILE selects an existing, validated OTP image; unset keeps
+    // the default otp.bin in the working directory (docs/otp-image.md).
+    if (const char* otpPath = std::getenv("OP1EMU_OTP_FILE")) {
+        try {
+            devices.emplace_back(std::make_shared<OTP>(0xFFC03600, otpPath, OtpStorage::ExistingImage));
+        } catch (const std::runtime_error& error) {
+            throw std::runtime_error(std::string("OP1EMU_OTP_FILE: ") + error.what() +
+                                     "; unset OP1EMU_OTP_FILE to use ./otp.bin");
+        }
+    } else {
+        devices.emplace_back(std::make_shared<OTP>(0xFFC03600, "otp.bin"));
+    }
     std::shared_ptr<USB> usb = std::make_shared<USB>(0xFFC03800);
     usb->BindInterrupt(IRQ_USB_INT0, IRQ_USB_INT1, IRQ_USB_INT2, IRQ_USB_DMAINT, irqHandler);
     devices.emplace_back(usb);

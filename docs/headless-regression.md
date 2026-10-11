@@ -19,12 +19,11 @@ cmake --build build --target op1emu-headless headless_tests execution_accounting
 wraps this with private input copies.
 
 The CPU still boots the original OP-1 NAND path. No flags/interrupts are fabricated
-to advance an unsupported boundary. The existing configured OTP input must also
-be supplied through the current local setup. For a clean baseline that selects
-`otp.bin` in its working directory, use an isolated run directory containing a
-private OTP copy and pass absolute NAND/UI/script paths; do not overwrite an
-existing OTP. The unrelated local `OP1EMU_OTP_FILE` customization is not imported
-by this frontend port.
+to advance an unsupported boundary. The configured OTP input must also be
+supplied: either `otp.bin` in the working directory, or an existing image
+selected with `OP1EMU_OTP_FILE`, which is validated and never created
+(`docs/otp-image.md`). Use a private OTP copy, or a read-only image, and pass
+absolute NAND/UI/script paths; do not overwrite an existing OTP.
 
 One script command per line; blank lines and lines beginning with `#` are ignored:
 

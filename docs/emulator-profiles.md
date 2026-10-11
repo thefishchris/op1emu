@@ -72,8 +72,11 @@ Neither profile fakes hardware state.
 | `OP1EMU_GUEST_CLOCK_COST` | `min-cost` | guest clock cost model | allowed | not set | yes |
 | `OP1EMU_TRACE_CLOCK` | 0 | MMIO clock-observation trace | allowed | not set | yes |
 
+`OP1EMU_OTP_FILE` selects the OTP image independently of the profile
+(`docs/otp-image.md`); unset keeps `otp.bin` in the working directory.
+
 Some controls exist only in uncommitted local work at the time of writing:
-`OP1EMU_AUDIO_PACING_DIVISOR` (defaults to the same ÷10), `OP1EMU_OTP_FILE`,
+`OP1EMU_AUDIO_PACING_DIVISOR` (defaults to the same ÷10),
 `OP1EMU_GPIO_MODEL` (defaults to 17), and the `OP1EMU_TRACE_*` and
 `OP1EMU_TIMING_PROBE` diagnostics. The profiles do not set them, and none is
 needed for the v241 boot at its default. The pacing divisor affects only the

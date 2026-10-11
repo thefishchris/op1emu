@@ -1,33 +1,40 @@
 #include "otp.h"
 #include "utils/log.h"
 #include <cstring>
+#include <filesystem>
+#include <stdexcept>
+#include <system_error>
 
 static constexpr u32 OTP_FPS00 = 0x004;
 static constexpr u32 OTP_FPS03 = 0x007;
 
-OTP::OTP(u32 baseAddr, const std::string& storagePath)
+OTP::OTP(u32 baseAddr, const std::string& storagePath, OtpStorage storage)
     : RegisterDevice("OTP", baseAddr, 0xA0),
       ben(0xFFFF), timing(0x00001485) {
 
     bool fileCreating = false;
-    // Try to open existing file, or create new one
-    storageFile.open(storagePath, std::ios::in | std::ios::out | std::ios::binary);
-    if (!storageFile.is_open()) {
-        fileCreating = true;
-        // Create new file initialized with erased state (0x00)
-        storageFile.open(storagePath, std::ios::out | std::ios::binary);
-        if (storageFile.is_open()) {
-            std::vector<u8> eraseBuffer(TOTAL_SIZE_BYTES, 0);
-            storageFile.write(reinterpret_cast<char*>(eraseBuffer.data()), TOTAL_SIZE_BYTES);
-            storageFile.close();
-            storageFile.open(storagePath, std::ios::in | std::ios::out | std::ios::binary);
-        }
-    }
-
-    if (storageFile.is_open()) {
-        LoadFromFile();
+    if (storage == OtpStorage::ExistingImage) {
+        OpenExistingImage(storagePath);
     } else {
-        LogError("OTP: Failed to open storage file: %s\n", storagePath.c_str());
+        // Try to open existing file, or create new one
+        storageFile.open(storagePath, std::ios::in | std::ios::out | std::ios::binary);
+        if (!storageFile.is_open()) {
+            fileCreating = true;
+            // Create new file initialized with erased state (0x00)
+            storageFile.open(storagePath, std::ios::out | std::ios::binary);
+            if (storageFile.is_open()) {
+                std::vector<u8> eraseBuffer(TOTAL_SIZE_BYTES, 0);
+                storageFile.write(reinterpret_cast<char*>(eraseBuffer.data()), TOTAL_SIZE_BYTES);
+                storageFile.close();
+                storageFile.open(storagePath, std::ios::in | std::ios::out | std::ios::binary);
+            }
+        }
+
+        if (storageFile.is_open()) {
+            LoadFromFile();
+        } else {
+            LogError("OTP: Failed to open storage file: %s\n", storagePath.c_str());
+        }
     }
 
     REG32(OTP_CONTROL, 0x00);
@@ -188,6 +195,37 @@ void OTP::WriteEcc(u16 page, u8 lo, u8 hi)
     SavePageToFile(eccPage);
 }
 
+void OTP::OpenExistingImage(const std::string& storagePath)
+{
+    const auto fail = [&storagePath](const std::string& problem) {
+        throw std::runtime_error("OTP image '" + storagePath + "' " + problem + "; expected an existing raw OTP image of exactly " +
+                                 std::to_string(TOTAL_SIZE_BYTES) + " bytes (" + std::to_string(NUM_PAGES) + " pages x " +
+                                 std::to_string(PAGE_SIZE_BYTES) + " bytes, see docs/otp-image.md)");
+    };
+    if (storagePath.empty()) fail("has an empty path");
+
+    std::error_code error;
+    const auto status = std::filesystem::status(storagePath, error);
+    if (status.type() == std::filesystem::file_type::not_found) fail("does not exist");
+    if (error) fail("cannot be inspected (" + error.message() + ")");
+    if (!std::filesystem::is_regular_file(status)) fail("is not a regular file");
+    const auto size = std::filesystem::file_size(storagePath, error);
+    if (error) fail("has an unknown size (" + error.message() + ")");
+    if (size != TOTAL_SIZE_BYTES) fail("is " + std::to_string(size) + " bytes, so it is truncated or not an OTP image");
+
+    // Never created or truncated: in|out opens an existing file only.
+    storageFile.open(storagePath, std::ios::in | std::ios::out | std::ios::binary);
+    if (!storageFile.is_open()) {
+        storageFile.open(storagePath, std::ios::in | std::ios::binary);
+        if (!storageFile.is_open()) fail("cannot be opened for reading");
+        storageReadOnly = true;
+    }
+    storageFile.read(reinterpret_cast<char*>(mem.data()), TOTAL_SIZE_BYTES);
+    if (storageFile.gcount() != static_cast<std::streamsize>(TOTAL_SIZE_BYTES)) fail("could not be read completely");
+    LogInfo("OTP: loaded %s image %s", storageReadOnly ? "read-only" : "writable", storagePath.c_str());
+    if (storageReadOnly) LogWarn("OTP: image is read-only; guest OTP writes are kept in memory and discarded on exit");
+}
+
 void OTP::LoadFromFile()
 {
     storageFile.seekg(0, std::ios::beg);
@@ -200,6 +238,11 @@ void OTP::SavePageToFile(u16 page)
 
     if (!storageFile.is_open()) {
         return; // Only in-memory storage
+    }
+    if (storageReadOnly) {
+        if (!readOnlyWriteLogged) LogWarn("OTP: guest wrote page 0x%03X; not saved to the read-only image", page);
+        readOnlyWriteLogged = true;
+        return;
     }
 
     u64 pageOffset = static_cast<u64>(page) * PAGE_SIZE_BYTES;

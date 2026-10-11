@@ -89,8 +89,16 @@ int main(int argc, char* argv[]) {
     // Create GLFW Display
     auto display = std::make_shared<GLFWDisplay>();
 
-    // Create BlackFin CPU
-    BlackFinCpu cpu;
+    // Create BlackFin CPU. Construction rejects unusable configuration, such
+    // as an invalid OP1EMU_OTP_FILE image, with an explanatory exception.
+    std::unique_ptr<BlackFinCpu> cpuStorage;
+    try {
+        cpuStorage = std::make_unique<BlackFinCpu>();
+    } catch (const std::exception& error) {
+        LogError("%s", error.what());
+        return 1;
+    }
+    BlackFinCpu& cpu = *cpuStorage;
     cpu.AttachDisplay(display);
     cpu.AttachKeyboard(display);
     auto audioOutput = std::make_shared<MiniaudioOutput>();
