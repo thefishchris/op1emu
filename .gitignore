@@ -49,3 +49,9 @@ __pycache__/
 *.BIN
 TE-OP-1-*.zip
 /otp.bin
+# Private OTP images (any name the OTP tools or run scripts produce)
+*.otp
+otp*.bin
+# Vendor datasheets downloaded to the checkout root (redistribution unclear);
+# PDFs under docs/ are not affected.
+/*.pdf
