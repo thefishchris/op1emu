@@ -1,6 +1,7 @@
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
 #include "audio_output_miniaudio.h"
+#include "pcm_sample.h"
 #include "utils/log.h"
 #include <cstring>
 #include <algorithm>
@@ -105,6 +106,10 @@ void MiniaudioOutput::WriteSamples(const void* data, size_t samples, int channel
     if (!active_.load() || samples == 0) {
         return;
     }
+    if (!data || channels < 1 || channels > 2 || bitsPerSample < 1 || bitsPerSample > 32) {
+        LogError("Unsupported audio PCM format: channels=%d bits=%d", channels, bitsPerSample);
+        return;
+    }
 
     ma_pcm_rb* rb = static_cast<ma_pcm_rb*>(ringBuffer_);
 
@@ -125,34 +130,8 @@ void MiniaudioOutput::WriteSamples(const void* data, size_t samples, int channel
         for (size_t i = 0; i < framesToProcess; i++) {
             float left = 0.0f, right = 0.0f;
 
-            if (bitsPerSample <= 16) {
-                // 16-bit signed integer
-                int16_t sample;
-                memcpy(&sample, src + i * srcStride, sizeof(int16_t));
-                left = static_cast<float>(sample) / 32768.0f;
-
-                if (channels >= 2) {
-                    memcpy(&sample, src + i * srcStride + 2, sizeof(int16_t));
-                    right = static_cast<float>(sample) / 32768.0f;
-                } else {
-                    right = left;
-                }
-            } else {
-                // 24-bit packed in 32-bit words
-                int32_t sample;
-                memcpy(&sample, src + i * srcStride, sizeof(int32_t));
-                // Sign-extend from 24-bit
-                sample = (sample << 8) >> 8;
-                left = static_cast<float>(sample) / 8388608.0f;
-
-                if (channels >= 2) {
-                    memcpy(&sample, src + i * srcStride + 4, sizeof(int32_t));
-                    sample = (sample << 8) >> 8;
-                    right = static_cast<float>(sample) / 8388608.0f;
-                } else {
-                    right = left;
-                }
-            }
+            left = DecodeSignedPcm(src + i * srcStride, static_cast<unsigned>(bitsPerSample));
+            right = channels == 2 ? DecodeSignedPcm(src + i * srcStride + wordSize, static_cast<unsigned>(bitsPerSample)) : left;
 
             chunk[i * CHANNELS] = left;
             chunk[i * CHANNELS + 1] = right;
