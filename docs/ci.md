@@ -53,11 +53,12 @@ One job on a GitHub-hosted runner:
 
 | Item | Version | How it is fixed |
 | --- | --- | --- |
-| Runner image | `ubuntu-24.04` | Named explicitly (not `ubuntu-latest`) |
+| Runner image | `ubuntu-24.04` (GitHub-hosted) | Named explicitly (not `ubuntu-latest`). The image itself is updated by GitHub. |
 | `actions/checkout` | v7.0.1 | Pinned to commit `3d3c42e5aac5ba805825da76410c181273ba90b1` |
-| LLVM | 15.0.7 (`llvm-15-dev`, Ubuntu `1:15.0.7-14build3` when this was written) | Ubuntu 24.04 archive; the version is checked in the workflow |
-| Compiler | GCC 13 (`g++`, Ubuntu 24.04 default) | Ubuntu archive |
-| CMake, Ninja, Python | Ubuntu 24.04 archive (CMake 3.28, Ninja 1.11, Python 3.12) | Ubuntu archive |
+| LLVM | 15.0.7 (`llvm-15-dev`, Ubuntu `1:15.0.7-14build3` when this was written) | Installed from the Ubuntu 24.04 packages; the workflow fails unless it is exactly 15.0.7 |
+| Compiler | GCC 13 (`/usr/bin/g++`, Ubuntu 24.04 default; 13.3.0 in the first hosted run) | Ubuntu packages; not version-checked |
+| CMake, Ninja | Whatever comes first on `PATH`. On hosted runners that is the image's preinstalled copy: CMake 3.31.6 and Ninja 1.13.2 in the first hosted run. In a plain Ubuntu 24.04 environment it is the Ubuntu packages (CMake 3.28, Ninja 1.11). | **Not enforced** by the workflow |
+| Python | 3.12 (`/usr/bin/python3`) | Ubuntu packages; not version-checked |
 | GUI build libraries | `libgl-dev`, `libx11-dev`, `libxrandr-dev`, `libxinerama-dev`, `libxcursor-dev`, `libxi-dev` (for GLFW's X11 backend) | Ubuntu archive |
 | Fetched dependencies | spdlog, GLFW, nlohmann/json, stb, cqueue, uvw/libuv, miniaudio | Pinned tags or commits in `CMakeLists.txt` |
 | Bcore and its test fixtures | Submodule commit; `bfin_sim` fixtures | Pinned commits |
@@ -66,10 +67,20 @@ One job on a GitHub-hosted runner:
 the archive drops superseded revisions. Each run logs the installed
 versions, and the LLVM check fails the run if the LLVM release changes.
 
-**Hosted runner differences:** hosted runners preinstall newer CMake and
-compilers. The workflow installs and uses the archive packages listed
-above. The versions actually used are in each run's "Record tool versions"
-step.
+**Hosted runner tools:** the GitHub-hosted `ubuntu-24.04` image
+preinstalls its own CMake and Ninja (under `/usr/local`), and these take
+precedence on `PATH` over the Ubuntu packages the workflow installs.
+- **First hosted run**
+  ([run 38177978251](https://github.com/thefishchris/op1emu/actions/runs/38177978251)):
+  it used CMake 3.31.6 and Ninja 1.13.2. A local check in a plain
+  `ubuntu:24.04` container used the packaged CMake 3.28.3 and Ninja
+  1.11.1. Both passed all 28 tests.
+- **Versions are not pinned:** the workflow does not currently enforce
+  exact CMake or Ninja versions. GitHub updates the runner image
+  regularly, so later runs may use different versions.
+- **Checked:** LLVM is the only toolchain version the workflow checks. The
+  versions each run actually used are in its "Record tool versions" and
+  "Configure" logs.
 
 **Updating `actions/checkout`:** replace both the commit SHA and the
 version comment, taking the SHA from the release tag on
